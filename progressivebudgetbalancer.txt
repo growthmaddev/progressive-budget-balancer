@@ -30,7 +30,7 @@ const CONFIG = {
   MIN_ROI_THRESHOLD: 3,
   
   // Configuration for shared budget identification
-  SHARED_BUDGET_IDENTIFIER: "CSB-", // Campaigns with this pattern in their name use shared budgets
+  SHARED_BUDGET_IDENTIFIER: "BUDGET ", // Campaigns with this pattern in their name use shared budgets
   
   // Conversion tracking settings
   CONVERSION_SETTINGS: {
@@ -170,6 +170,8 @@ var scriptTimezone; // Script-level variable to store account timezone
 // Initialize caching system at the module level
 let campaignDataCache = null;
 let cacheTimestamps = null;
+
+```javascript
 
 function initializeCache() {
   if (!campaignDataCache) {
@@ -961,114 +963,61 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     const budget = campaign.getBudget();
     const campaignName = campaign.getName();
     
+    // Detect if campaign uses shared budget
+    let isSharedBudget = false;
+    let sharedBudgetId = null;
+    
+    // Try API detection first
+    try {
+      const query = `
+        SELECT campaign.id, campaign_budget.id, campaign_budget.type
+        FROM campaign
+        WHERE campaign.id = ${campaign.getId()}
+      `;
+      
+      const report = AdsApp.report(query);
+      const rows = report.rows();
+      
+      if (rows.hasNext()) {
+        const row = rows.next();
+        const budgetType = row['campaign_budget.type'];
+        
+        if (budgetType === 'SHARED') {
+          isSharedBudget = true;
+          sharedBudgetId = row['campaign_budget.id'];
+        }
+      }
+    } catch (e) {
+      // Fallback to name-based detection
+      const budgetPattern = /BUDGET\s+\d+\s*\|/;
+      isSharedBudget = budgetPattern.test(campaignName);
+      
+      // Extract budget group number if possible
+      if (isSharedBudget) {
+        const match = campaignName.match(/BUDGET\s+(\d+)\s*\|/);
+        if (match && match[1]) {
+          sharedBudgetId = "group_" + match[1];
+        }
+      }
+    }
+    
     // Get basic metrics
     const cost = stats.getCost();
     const clicks = stats.getClicks();
     const impressions = stats.getImpressions();
     
-    // Get conversion metrics
-    let conversions, conversionValue;
-    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
-      const conversionData = getSpecificConversionMetrics(
-        campaign, 
-        dateRange, 
-        CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME
-      );
-      conversions = conversionData.conversions;
-      conversionValue = conversionData.conversionValue;
-    } else {
-      conversions = stats.getConversions();
-      conversionValue = conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE;
-    }
+    // Rest of your existing code...
     
-    // Get recent conversions (past 21 days)
-    let recentConversions = 0;
-    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
-      const endDate = new Date();
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - CONFIG.RECENT_PERFORMANCE_PERIOD);
-      
-      const recentDateRange = {
-        start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
-        end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
-      };
-      
-      const recentData = getSpecificConversionMetrics(
-        campaign, 
-        recentDateRange, 
-        CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME
-      );
-      recentConversions = recentData.conversions;
-    } else {
-      const endDate = new Date();
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - CONFIG.RECENT_PERFORMANCE_PERIOD);
-      
-      const recentDateRange = {
-        start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
-        end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
-      };
-      
-      const recentStats = campaign.getStatsFor(recentDateRange.start, recentDateRange.end);
-      recentConversions = recentStats.getConversions();
-    }
-    
-    // Calculate key metrics
-    const currentDailyBudget = budget.getAmount();
-    const roi = cost > 0 ? conversionValue / cost : 0;
-    const cpa = conversions > 0 ? cost / conversions : 0;
-    const roas = cost > 0 ? (conversionValue / cost) * 100 : 0;
-    
-    // Get performance metrics
-    const impressionShare = getImpressionShare(campaign, dateRange);
-    const budgetImpressionShareLost = getImpressionShareLostToBudget(campaign, dateRange);
-    
-    // Get day-of-week data if enabled, with fallback
-    let dayOfWeekData = null;
-    let dayOfWeekAdjustment = {
-      appliedMultiplier: 1.0,
-      confidence: 0.0,
-      rawMultiplier: 1.0,
-      dayName: "Fallback"
-    };
-    
-    if (CONFIG.DAY_OF_WEEK.ENABLED) {
-      try {
-        dayOfWeekData = getDayOfWeekData(campaign, dowDateRange);
-        
-        // If day-of-week data exists and has valid adjustment, use it
-        if (dayOfWeekData && dayOfWeekData.adjustment) {
-          dayOfWeekAdjustment = {
-            appliedMultiplier: dayOfWeekData.adjustment.appliedMultiplier || 1.0,
-            confidence: dayOfWeekData.adjustment.confidence || 0.0,
-            rawMultiplier: dayOfWeekData.adjustment.rawMultiplier || 1.0,
-            dayName: dayOfWeekData.adjustment.dayName || "Unknown"
-          };
-        }
-      } catch (e) {
-        Logger.log(`Error getting day-of-week data for ${campaignName}: ${e}`);
-        // Keep default values for dayOfWeekAdjustment
-      }
-    }
-    
-    // Create campaign data object
+    // Create campaign data object with shared budget properties
     const campaignData = {
       campaign: campaign,
       name: campaignName,
+      isSharedBudget: isSharedBudget,     // Add this
+      sharedBudgetId: sharedBudgetId,     // Add this
       currentDailyBudget,
       cost,
       conversions,
-      conversionValue,
-      clicks,
-      impressions,
-      roi,
-      cpa,
-      roas,
-      impressionShare,
-      budgetImpressionShareLost,
-      dayOfWeekData,
-      recentConversions,
-      dayOfWeekAdjustment // Store the adjustment directly
+      // Rest of properties...
     };
     
     return campaignData;
@@ -1078,67 +1027,52 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
   }
 }
 
-// Calculate day-of-week performance indices for a campaign
-function calculateDayOfWeekIndices(dayPerformance) {
-  try {
-    // Calculate overall daily averages across all days
-    let totalConversions = 0;
-    let totalDays = 0;
-    
-    for (let i = 0; i < 7; i++) {
-      totalConversions += dayPerformance[i].conversions;
-      totalDays += dayPerformance[i].days;
-    }
-    
-    // Overall daily averages
-    const avgDailyConversions = totalDays > 0 ? totalConversions / totalDays : 0;
-    
-    // Calculate indices for each day (relative to average performance)
-    const dayIndices = {};
-    
-    for (let i = 0; i < 7; i++) {
-      const day = dayPerformance[i];
-      
-      // Skip days with insufficient data
-      if (day.days < CONFIG.DAY_OF_WEEK.MIN_DATA_POINTS) {
-        dayIndices[i] = {
-          name: day.name,
-          conversionIndex: 1.0, // Default to neutral
-          confidence: 0, // No confidence
-          sampleSize: day.days
+function groupCampaignsByBudget(campaigns) {
+  const sharedBudgetGroups = {};
+  const individualCampaigns = [];
+  const sharedBudgetObjects = {};
+  
+  // First pass: group campaigns by shared budget ID
+  for (const campaign of campaigns) {
+    if (campaign.isSharedBudget && campaign.sharedBudgetId) {
+      if (!sharedBudgetGroups[campaign.sharedBudgetId]) {
+        sharedBudgetGroups[campaign.sharedBudgetId] = {
+          campaigns: [],
+          totalBudget: campaign.currentDailyBudget,
+          budgetId: campaign.sharedBudgetId,
+          budgetName: `Budget Group ${campaign.sharedBudgetId}`
         };
-        continue;
       }
-      
-      // Calculate conversion performance index
-      // (how many conversions on this day compared to average day)
-      const conversionIndex = avgDailyConversions > 0 ? 
-        day.avgDailyConversions / avgDailyConversions : 1.0;
-      
-      // Calculate confidence score based on sample size
-      // More data points = higher confidence, max at 30+ data points
-      const confidence = Math.min(1.0, day.days / 30);
-      
-      // Store indices
-      dayIndices[i] = {
-        name: day.name,
-        conversionIndex: conversionIndex,
-        confidence: confidence,
-        sampleSize: day.days
-      };
+      sharedBudgetGroups[campaign.sharedBudgetId].campaigns.push(campaign);
+    } else {
+      individualCampaigns.push(campaign);
     }
-    
-    return {
-      dayIndices: dayIndices,
-      avgDailyConversions: avgDailyConversions
-    };
-  } catch (e) {
-    Logger.log(`Error calculating day-of-week indices: ${e}`);
-    return {
-      dayIndices: {},
-      avgDailyConversions: 0
-    };
   }
+  
+  // Second pass: try to get shared budget objects via API
+  for (const budgetId in sharedBudgetGroups) {
+    try {
+      const budgetIterator = AdsApp.budgets()
+        .withCondition(`campaign_budget.id = ${budgetId}`)
+        .get();
+      
+      if (budgetIterator.hasNext()) {
+        sharedBudgetObjects[budgetId] = budgetIterator.next();
+      } else {
+        Logger.log(`Could not find budget object for shared budget ${budgetId}`);
+      }
+    } catch (e) {
+      Logger.log(`Error getting budget object for ID ${budgetId}: ${e}`);
+    }
+  }
+  
+  Logger.log(`Found ${Object.keys(sharedBudgetGroups).length} shared budget groups and ${individualCampaigns.length} individual campaigns`);
+  
+  return {
+    sharedBudgetGroups,
+    individualCampaigns,
+    sharedBudgetObjects
+  };
 }
 
 function logDayOfWeekPerformanceSummary(campaignData) {
@@ -3446,3 +3380,4 @@ function analyzeCampaignPerformance(campaign, dateRange) {
     return null;
   }
 }
+```
