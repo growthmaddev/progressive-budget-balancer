@@ -961,7 +961,7 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     const budget = campaign.getBudget();
     const campaignName = campaign.getName();
     
-    // Get budget amount FIRST before shared budget detection
+    // Get budget amount FIRST
     const currentDailyBudget = budget.getAmount();
     
     // Detect if campaign uses shared budget
@@ -993,7 +993,6 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       const budgetPattern = /BUDGET\s+\d+\s*\|/;
       isSharedBudget = budgetPattern.test(campaignName);
       
-      // Extract budget group number if possible
       if (isSharedBudget) {
         const match = campaignName.match(/BUDGET\s+(\d+)\s*\|/);
         if (match && match[1]) {
@@ -1007,9 +1006,30 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     const clicks = stats.getClicks();
     const impressions = stats.getImpressions();
     
-    // Rest of your conversion metrics code...
+    // Get conversion metrics - THIS WAS MISSING
+    let conversions, conversionValue;
+    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
+      const conversionData = getSpecificConversionMetrics(
+        campaign, 
+        dateRange, 
+        CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME
+      );
+      conversions = conversionData.conversions;
+      conversionValue = conversionData.conversionValue;
+    } else {
+      conversions = stats.getConversions();
+      conversionValue = conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE;
+    }
     
-    // Create campaign data object with shared budget properties
+    // Get recent conversions (past 21 days)
+    let recentConversions = 0;
+    try {
+      recentConversions = getRecentConversions(campaign, CONFIG.RECENT_PERFORMANCE_PERIOD);
+    } catch (e) {
+      Logger.log(`Error getting recent conversions: ${e.message}`);
+    }
+    
+    // Create campaign data object
     const campaignData = {
       campaign: campaign,
       name: campaignName,
@@ -1017,8 +1037,11 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       sharedBudgetId: sharedBudgetId,
       currentDailyBudget: currentDailyBudget,
       cost,
+      clicks,
+      impressions,
       conversions,
-      // Rest of properties...
+      conversionValue,
+      recentConversions
     };
     
     return campaignData;
@@ -1026,54 +1049,6 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     Logger.log(`Error processing campaign ${campaign.getName()}: ${e}`);
     return null;
   }
-}
-
-function groupCampaignsByBudget(campaigns) {
-  const sharedBudgetGroups = {};
-  const individualCampaigns = [];
-  const sharedBudgetObjects = {};
-  
-  // First pass: group campaigns by shared budget ID
-  for (const campaign of campaigns) {
-    if (campaign.isSharedBudget && campaign.sharedBudgetId) {
-      if (!sharedBudgetGroups[campaign.sharedBudgetId]) {
-        sharedBudgetGroups[campaign.sharedBudgetId] = {
-          campaigns: [],
-          totalBudget: campaign.currentDailyBudget,
-          budgetId: campaign.sharedBudgetId,
-          budgetName: `Budget Group ${campaign.sharedBudgetId}`
-        };
-      }
-      sharedBudgetGroups[campaign.sharedBudgetId].campaigns.push(campaign);
-    } else {
-      individualCampaigns.push(campaign);
-    }
-  }
-  
-  // Second pass: try to get shared budget objects via API
-  for (const budgetId in sharedBudgetGroups) {
-    try {
-      const budgetIterator = AdsApp.budgets()
-        .withCondition(`campaign_budget.id = ${budgetId}`)
-        .get();
-      
-      if (budgetIterator.hasNext()) {
-        sharedBudgetObjects[budgetId] = budgetIterator.next();
-      } else {
-        Logger.log(`Could not find budget object for shared budget ${budgetId}`);
-      }
-    } catch (e) {
-      Logger.log(`Error getting budget object for ID ${budgetId}: ${e}`);
-    }
-  }
-  
-  Logger.log(`Found ${Object.keys(sharedBudgetGroups).length} shared budget groups and ${individualCampaigns.length} individual campaigns`);
-  
-  return {
-    sharedBudgetGroups,
-    individualCampaigns,
-    sharedBudgetObjects
-  };
 }
 
 function logDayOfWeekPerformanceSummary(campaignData) {
