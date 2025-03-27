@@ -961,6 +961,9 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     const budget = campaign.getBudget();
     const campaignName = campaign.getName();
     
+    // Get budget amount FIRST before shared budget detection
+    const currentDailyBudget = budget.getAmount();
+    
     // Detect if campaign uses shared budget
     let isSharedBudget = false;
     let sharedBudgetId = null;
@@ -1004,15 +1007,15 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     const clicks = stats.getClicks();
     const impressions = stats.getImpressions();
     
-    // Rest of your existing code...
+    // Rest of your conversion metrics code...
     
     // Create campaign data object with shared budget properties
     const campaignData = {
       campaign: campaign,
       name: campaignName,
-      isSharedBudget: isSharedBudget,     // Add this
-      sharedBudgetId: sharedBudgetId,     // Add this
-      currentDailyBudget,
+      isSharedBudget: isSharedBudget,
+      sharedBudgetId: sharedBudgetId,
+      currentDailyBudget: currentDailyBudget,
       cost,
       conversions,
       // Rest of properties...
