@@ -44,6 +44,25 @@ The Progressive Budget Balancer is an advanced script designed to optimize Googl
 - **Error Handling Module** - Exception management and recovery
 - **History Module** - Store and retrieve historical adjustments
 
+y## Shared Budget Handling
+
+The Progressive Budget Balancer automatically detects and optimizes shared budgets:
+
+- **Detection:** The script uses the Google Ads API to identify campaigns that use shared budgets
+- **Grouping:** Campaigns with the same shared budget are grouped and analyzed collectively
+- **Performance Analysis:** Metrics from all campaigns within a shared budget are combined for decision-making
+- **Budget Optimization:** Adjustments are made to the shared budget object, affecting all campaigns in the group
+
+No special naming conventions are required as the script detects shared budgets directly through the API.
+
+### Shared Budget Processing
+
+When optimizing shared budgets, the script:
+1. Calculates aggregate performance metrics for all campaigns in the shared budget
+2. Determines a single adjustment factor based on combined performance
+3. Applies day-of-week patterns from campaigns with reliable data
+4. Updates the shared budget amount directly, maintaining the shared relationship
+
 ## 3. Data Structures
 
 ### 3.1 Campaign Data Object
