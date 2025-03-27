@@ -171,8 +171,6 @@ var scriptTimezone; // Script-level variable to store account timezone
 let campaignDataCache = null;
 let cacheTimestamps = null;
 
-```javascript
-
 function initializeCache() {
   if (!campaignDataCache) {
     campaignDataCache = new Map();
@@ -3380,4 +3378,3 @@ function analyzeCampaignPerformance(campaign, dateRange) {
     return null;
   }
 }
-```
