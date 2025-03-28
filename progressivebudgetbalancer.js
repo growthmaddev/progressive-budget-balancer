@@ -161,7 +161,53 @@ const CONFIG = {
     MAX_SPECIAL_EVENTS: 50,
     CACHE_EXPIRY_MS: 3600000, // 1 hour
     MAX_CACHE_SIZE: 1000
-  }
+  },
+  
+  // Add to CONFIG object
+  STRATEGY_METRICS: {
+    'TARGET_CPA': { 
+      primary_metric: 'cpa',
+      secondary_metrics: ['conversion_rate', 'impression_share'],
+      weights: { cpa: 0.6, conversion_rate: 0.2, impression_share: 0.2 },
+      better_if_lower: true
+    },
+    'TARGET_ROAS': { 
+      primary_metric: 'roas',
+      secondary_metrics: ['conversion_value', 'impression_share'],
+      weights: { roas: 0.6, conversion_value: 0.2, impression_share: 0.2 },
+      better_if_lower: false
+    },
+    'MAXIMIZE_CONVERSIONS': { 
+      primary_metric: 'conversion_rate',
+      secondary_metrics: ['cpa', 'impression_share'],
+      weights: { conversion_rate: 0.6, cpa: 0.2, impression_share: 0.2 },
+      better_if_lower: false
+    },
+    'MAXIMIZE_CONVERSION_VALUE': { 
+      primary_metric: 'conversion_value_per_cost',
+      secondary_metrics: ['conversion_value', 'impression_share'],
+      weights: { conversion_value_per_cost: 0.6, conversion_value: 0.2, impression_share: 0.2 },
+      better_if_lower: false
+    },
+    'TARGET_IMPRESSION_SHARE': { 
+      primary_metric: 'impression_share',
+      secondary_metrics: ['ctr', 'click_share'],
+      weights: { impression_share: 0.7, ctr: 0.2, click_share: 0.1 },
+      better_if_lower: false
+    },
+    'MAXIMIZE_CLICKS': { 
+      primary_metric: 'ctr',
+      secondary_metrics: ['cpc', 'impression_share'],
+      weights: { ctr: 0.5, cpc: 0.3, impression_share: 0.2 },
+      better_if_lower: false
+    },
+    'MANUAL_CPC': { 
+      primary_metric: 'conversion_value_per_cost',
+      secondary_metrics: ['ctr', 'cpc', 'impression_share'],
+      weights: { conversion_value_per_cost: 0.4, ctr: 0.3, cpc: 0.2, impression_share: 0.1 },
+      better_if_lower: false
+    }
+  },
 };
 
 // At the top of your script file, add this line:
@@ -2253,8 +2299,23 @@ function processPortfolioBidStrategies(campaignData) {
   Logger.log("==================================================");
 }
 
+// At the beginning of processCampaignBudgets function, add a safety check for campaigns array
 function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
   try {
+    // Safety check for campaignData structure
+    if (!campaignData) {
+      Logger.log("Error: campaignData is missing or invalid");
+      return;
+    }
+    
+    // Ensure campaigns array exists
+    if (!campaignData.campaigns || !Array.isArray(campaignData.campaigns)) {
+      Logger.log("Error: campaignData.campaigns is missing or not an array");
+      campaignData.campaigns = [];
+    }
+    
+    Logger.log(`Processing budget adjustments for ${campaignData.campaigns.length} campaigns`);
+    
     // Log budget pacing impact
     Logger.log("\n===== BUDGET PACING IMPACT ON CAMPAIGNS =====");
     if (pacingInfo) {
@@ -4054,5 +4115,288 @@ function calculateOptimalBudget(campaign, sharedBudgetInfo) {
     // Use individual campaign metrics
     return calculateIndividualBudgetAmount(campaign);
   }
+}
+
+/**
+ * Gets the effective bidding strategy for a campaign
+ * Handles both individual strategies and portfolio bid strategies
+ */
+function getEffectiveBiddingStrategy(campaign, campaignData) {
+  // First try to get portfolio bid strategy if available
+  const campaignId = campaign.campaign.getId();
+  if (campaignData.campaignToPortfolioMap && campaignData.campaignToPortfolioMap[campaignId]) {
+    const portfolioName = campaignData.campaignToPortfolioMap[campaignId];
+    if (campaignData.portfolioStrategies && campaignData.portfolioStrategies[portfolioName]) {
+      const portfolioType = campaignData.portfolioStrategies[portfolioName].type;
+      if (portfolioType) {
+        Logger.log(`Using portfolio bid strategy type: ${portfolioType} for campaign ${campaign.name}`);
+        return portfolioType;
+      }
+    }
+  }
+  
+  // Fall back to individual campaign's bid strategy
+  try {
+    const bidStrategy = campaign.campaign.getBiddingStrategyType();
+    Logger.log(`Using campaign bid strategy type: ${bidStrategy} for campaign ${campaign.name}`);
+    return bidStrategy;
+  } catch (e) {
+    Logger.log(`Error getting bid strategy for campaign ${campaign.name}: ${e}`);
+    return 'UNKNOWN';
+  }
+}
+
+/**
+ * Calculates performance metrics for a campaign based on its bidding strategy
+ * and whether to use specific conversion actions or primary conversions
+ */
+function calculateStrategyMetrics(campaign, useSpecificConversionAction) {
+  const metrics = {};
+  
+  // Get base stats
+  const stats = campaign.stats || {};
+  const cost = campaign.cost || 0.01; // Avoid division by zero
+  const clicks = stats.clicks || 0;
+  const impressions = stats.impressions || 1; // Avoid division by zero
+  
+  // Get conversion metrics based on setting
+  let conversions, conversionValue;
+  if (useSpecificConversionAction) {
+    conversions = campaign.specificConversions || 0;
+    conversionValue = campaign.specificConversionValue || 0;
+  } else {
+    conversions = stats.conversions || 0;
+    conversionValue = stats.conversionValue || 0;
+  }
+  
+  // Calculate standard metrics
+  metrics.ctr = clicks / impressions;
+  metrics.cpc = clicks > 0 ? cost / clicks : 0;
+  metrics.conversion_rate = clicks > 0 ? conversions / clicks : 0;
+  metrics.cpa = conversions > 0 ? cost / conversions : Infinity;
+  metrics.roas = cost > 0 ? (conversionValue / cost) * 100 : 0; // as percentage
+  metrics.conversion_value_per_cost = cost > 0 ? conversionValue / cost : 0;
+  metrics.impression_share = 1 - (campaign.budgetImpressionShareLost / 100);
+  metrics.click_share = stats.clickShare || 0;
+  
+  return metrics;
+}
+
+/**
+ * Calculates performance score for a campaign based on its specific bidding strategy
+ */
+function calculateStrategyPerformanceScore(campaign, campaignData) {
+  // Get the campaign's effective bidding strategy
+  const strategyType = getEffectiveBiddingStrategy(campaign, campaignData);
+  
+  // Get strategy metrics configuration
+  const strategyMetricsConfig = CONFIG.STRATEGY_METRICS[strategyType] || 
+                               CONFIG.STRATEGY_METRICS['MANUAL_CPC']; // Default fallback
+  
+  // Calculate actual metrics
+  const useSpecificConversion = CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION;
+  const metrics = calculateStrategyMetrics(campaign, useSpecificConversion);
+  
+  // Start with base score
+  let score = 1.0;
+  let weightSum = 0;
+  
+  // Log the metrics we're using
+  Logger.log(`Calculating strategy-specific score for ${campaign.name} using ${strategyType} strategy:`);
+  
+  // Apply primary metric (most important for this strategy)
+  const primaryMetric = strategyMetricsConfig.primary_metric;
+  const primaryWeight = strategyMetricsConfig.weights[primaryMetric] || 0.6;
+  weightSum += primaryWeight;
+  
+  if (metrics[primaryMetric] !== undefined) {
+    // Normalize the metric - high is always good for our score
+    let normalizedMetricValue;
+    
+    if (primaryMetric === 'cpa' || primaryMetric === 'cpc') {
+      // For metrics where lower is better, invert the relationship
+      // Use a logarithmic scale to handle wide ranges
+      const threshold = CONFIG.STRATEGY_THRESHOLDS[strategyType].threshold || 1;
+      if (metrics[primaryMetric] > 0) {
+        normalizedMetricValue = threshold / metrics[primaryMetric];
+      } else {
+        normalizedMetricValue = 1.0; // Default if metric is zero
+      }
+    } else {
+      // For metrics where higher is better
+      const threshold = CONFIG.STRATEGY_THRESHOLDS[strategyType].threshold || 0.01;
+      normalizedMetricValue = metrics[primaryMetric] / threshold;
+    }
+    
+    // Cap the normalized value to avoid extreme adjustments
+    normalizedMetricValue = Math.max(0.5, Math.min(2.0, normalizedMetricValue));
+    
+    Logger.log(`  ${primaryMetric}: ${metrics[primaryMetric].toFixed(2)} → normalized: ${normalizedMetricValue.toFixed(2)} (weight: ${primaryWeight})`);
+    
+    // Apply to score
+    score *= 1 + ((normalizedMetricValue - 1) * primaryWeight);
+  }
+  
+  // Apply secondary metrics
+  for (const metricName of strategyMetricsConfig.secondary_metrics || []) {
+    const weight = strategyMetricsConfig.weights[metricName] || 0.1;
+    weightSum += weight;
+    
+    if (metrics[metricName] !== undefined) {
+      // Similar normalization logic for secondary metrics
+      let normalizedValue;
+      
+      if (metricName === 'cpa' || metricName === 'cpc') {
+        const threshold = 1; // Default threshold
+        normalizedValue = metrics[metricName] > 0 ? threshold / metrics[metricName] : 1.0;
+      } else {
+        const threshold = 0.01; // Default threshold
+        normalizedValue = metrics[metricName] / threshold;
+      }
+      
+      // Cap the normalized value
+      normalizedValue = Math.max(0.5, Math.min(1.5, normalizedValue));
+      
+      Logger.log(`  ${metricName}: ${metrics[metricName].toFixed(2)} → normalized: ${normalizedValue.toFixed(2)} (weight: ${weight})`);
+      
+      // Apply to score
+      score *= 1 + ((normalizedValue - 1) * weight);
+    }
+  }
+  
+  // Apply trend factor (if available) with remaining weight
+  const trendWeight = Math.max(0.1, 1 - weightSum);
+  if (campaign.trendFactor) {
+    Logger.log(`  trend factor: ${campaign.trendFactor.toFixed(2)} (weight: ${trendWeight.toFixed(2)})`);
+    score *= 1 + ((campaign.trendFactor - 1) * trendWeight);
+  }
+  
+  // Apply day-of-week adjustment if available and confident
+  if (campaign.dayOfWeekAdjustment && campaign.dayOfWeekAdjustment.confidence >= 0.3) {
+    const dowAdjustment = campaign.dayOfWeekAdjustment.appliedMultiplier;
+    Logger.log(`  day-of-week adjustment: ${dowAdjustment.toFixed(2)}`);
+    score *= 1 + ((dowAdjustment - 1) * 0.1); // Apply with 10% weight
+  }
+  
+  // Ensure score stays within reasonable bounds
+  score = Math.max(0.5, Math.min(2.0, score));
+  
+  Logger.log(`  Final strategy-specific score: ${score.toFixed(2)}`);
+  return score;
+}
+
+function processSharedBudget(budgetGroup, campaignData) {
+  // Track strategies used in this shared budget
+  const strategiesUsed = new Set();
+  
+  // Get strategy for each campaign
+  for (const campaignInfo of budgetGroup.campaigns) {
+    const campaign = campaignInfo.campaign;
+    if (!campaign) continue;
+    
+    const strategyType = getEffectiveBiddingStrategy(
+      {campaign: campaign, name: campaignInfo.name}, 
+      campaignData
+    );
+    strategiesUsed.add(strategyType);
+  }
+  
+  // Log strategies found
+  Logger.log(`Shared budget ${budgetGroup.name} uses ${strategiesUsed.size} different strategies: ${Array.from(strategiesUsed).join(', ')}`);
+  
+  // Calculate strategy-specific metrics for each campaign
+  const campaignScores = [];
+  
+  for (const campaignInfo of budgetGroup.campaigns) {
+    try {
+      // Find campaign in the main dataset
+      let matchingCampaign = null;
+      for (const c of campaignData.campaigns) {
+        if (c.campaign.getId() === campaignInfo.id) {
+          matchingCampaign = c;
+          break;
+        }
+      }
+      
+      if (matchingCampaign) {
+        // Calculate strategy-specific score
+        const score = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
+        
+        campaignScores.push({
+          campaign: matchingCampaign,
+          score: score,
+          strategy: getEffectiveBiddingStrategy(matchingCampaign, campaignData)
+        });
+      }
+    } catch (e) {
+      Logger.log(`Error calculating score for campaign in shared budget: ${e}`);
+    }
+  }
+  
+  // Use weighted average if we have mixed strategies
+  let finalBudgetScore = 1.0;
+  
+  if (campaignScores.length > 0) {
+    // Normalize scores across different strategy types
+    let totalScore = 0;
+    let totalWeight = 0;
+    
+    for (const item of campaignScores) {
+      // Weight by campaign spend or impressions
+      const weight = item.campaign.cost || 1;
+      totalScore += item.score * weight;
+      totalWeight += weight;
+    }
+    
+    if (totalWeight > 0) {
+      finalBudgetScore = totalScore / totalWeight;
+    }
+    
+    Logger.log(`Final weighted performance score for shared budget: ${finalBudgetScore.toFixed(2)}`);
+  }
+  
+  return finalBudgetScore;
+}
+
+// For each portfolio strategy
+for (const strategyName in campaignData.portfolioStrategies) {
+  const strategy = campaignData.portfolioStrategies[strategyName];
+  
+  // Calculate a performance score specific to this strategy type
+  let totalScore = 0;
+  let weightedTotal = 0;
+  
+  for (const campaignInfo of strategy.campaigns) {
+    try {
+      // Find matching campaign in our main dataset
+      let matchingCampaign = null;
+      for (const c of campaignData.campaigns) {
+        if (c.campaign.getId() === campaignInfo.id) {
+          matchingCampaign = c;
+          break;
+        }
+      }
+      
+      if (matchingCampaign) {
+        // Calculate objective-specific performance
+        const campaignScore = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
+        
+        // Weight by campaign cost or other relevant metric
+        const weight = matchingCampaign.cost || 1;
+        totalScore += campaignScore * weight;
+        weightedTotal += weight;
+      }
+    } catch (e) {
+      Logger.log(`Error calculating performance for campaign in portfolio: ${e}`);
+    }
+  }
+  
+  // Calculate weighted average score
+  const portfolioScore = weightedTotal > 0 ? totalScore / weightedTotal : 1.0;
+  
+  Logger.log(`Portfolio strategy "${strategyName}" performance score: ${portfolioScore.toFixed(2)}`);
+  
+  // Use this score when generating recommendations for shared budgets
+  // associated with this portfolio (if applicable)
 }
 
