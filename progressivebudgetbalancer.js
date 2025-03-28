@@ -11,6 +11,20 @@
 
 // Configuration
 const CONFIG = {
+  // Optimization strategy override
+  OPTIMIZATION_STRATEGY: {
+    // Set to null to use campaign-specific strategies, or specify one of:
+    // "MAXIMIZE_CONVERSIONS" - Optimize for conversion volume
+    // "MAXIMIZE_CONVERSION_VALUE" - Optimize for conversion value
+    // "TARGET_CPA" - Optimize for target cost per acquisition
+    // "TARGET_ROAS" - Optimize for target return on ad spend
+    // "MAXIMIZE_CLICKS" - Optimize for click volume
+    // "TARGET_IMPRESSION_SHARE" - Optimize for impression share
+    // "MANUAL_CPC" - Optimize for ROI (default fallback)
+    //  null - script will automatically detect strategy
+    OVERRIDE: null
+  },
+  
   // Lookback period in days (approximately 3 months)
   LOOKBACK_PERIOD: 90,
   
@@ -1849,7 +1863,7 @@ function processSharedBudgets(campaignData, dateRange) {
       
       // Apply trend factor to adjustment
       adjustmentFactor = adjustmentFactor * budget.avgTrendFactor;
-      adjustmentReason += ` Applied trend factor: ${budget.avgTrendFactor.toFixed(2)} (${CONFIG.RECENT_PERFORMANCE_PERIOD}-day vs ${CONFIG.LOOKBACK_PERIOD}-day performance).`;
+      adjustmentReason += ` Applied trend factor: ${budget.avgTrendFactor.toFixed(2)} (${CONFIG.RECENT_PERFORMANCE_PERIOD}-day vs ${CONFIG.LOOKBACK_PERFORMANCE_PERIOD}-day performance).`;
       
       // NEW: Apply day-of-week adjustment if enabled
       if (CONFIG.DAY_OF_WEEK.ENABLED && budget.dowCampaignsWithData > 0) {
@@ -4352,7 +4366,13 @@ function calculateOptimalBudget(campaign, sharedBudgetInfo) {
  * Handles both individual strategies and portfolio bid strategies
  */
 function getEffectiveBiddingStrategy(campaign, campaignData) {
-  // First try to get portfolio bid strategy if available
+  // Check for global override first
+  if (CONFIG.OPTIMIZATION_STRATEGY.OVERRIDE) {
+    Logger.log(`Using global optimization strategy override: ${CONFIG.OPTIMIZATION_STRATEGY.OVERRIDE}`);
+    return CONFIG.OPTIMIZATION_STRATEGY.OVERRIDE;
+  }
+  
+  // Then try to get portfolio bid strategy if available
   const campaignId = campaign.campaign.getId();
   if (campaignData.campaignToPortfolioMap && campaignData.campaignToPortfolioMap[campaignId]) {
     const portfolioName = campaignData.campaignToPortfolioMap[campaignId];
@@ -4372,7 +4392,7 @@ function getEffectiveBiddingStrategy(campaign, campaignData) {
     return bidStrategy;
   } catch (e) {
     Logger.log(`Error getting bid strategy for campaign ${campaign.name}: ${e}`);
-    return 'UNKNOWN';
+    return 'MANUAL_CPC'; // Default to MANUAL_CPC instead of UNKNOWN
   }
 }
 
