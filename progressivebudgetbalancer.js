@@ -307,20 +307,36 @@ function calculateMaxDailyBudget() {
  */
 
 // Get performance data by day of week for a campaign
-function getDayOfWeekPerformance(campaign, dateRange) {
+function getDayOfWeekPerformance(campaign, dateRange, campaignData) {
   try {
-    // Create simplified object to store only conversion data by day
+    // Create simplified object to store both conversion and conversion value data by day
     const dayPerformance = {
-      0: { name: 'Sunday', conversions: 0, days: 0 },
-      1: { name: 'Monday', conversions: 0, days: 0 },
-      2: { name: 'Tuesday', conversions: 0, days: 0 },
-      3: { name: 'Wednesday', conversions: 0, days: 0 },
-      4: { name: 'Thursday', conversions: 0, days: 0 },
-      5: { name: 'Friday', conversions: 0, days: 0 },
-      6: { name: 'Saturday', conversions: 0, days: 0 }
+      0: { name: 'Sunday', conversions: 0, conversionValue: 0, days: 0 },
+      1: { name: 'Monday', conversions: 0, conversionValue: 0, days: 0 },
+      2: { name: 'Tuesday', conversions: 0, conversionValue: 0, days: 0 },
+      3: { name: 'Wednesday', conversions: 0, conversionValue: 0, days: 0 },
+      4: { name: 'Thursday', conversions: 0, conversionValue: 0, days: 0 },
+      5: { name: 'Friday', conversions: 0, conversionValue: 0, days: 0 },
+      6: { name: 'Saturday', conversions: 0, conversionValue: 0, days: 0 }
     };
     
-    // Get conversion data using the proper method for specific conversion actions
+    // Determine if this is a value-based strategy
+    let isValueBased = false;
+    if (campaignData && campaignData.campaigns) {
+      // Find the campaign in campaignData
+      const campaignObj = campaignData.campaigns.find(c => 
+        c.campaign && c.campaign.getId() === campaign.getId());
+      
+      if (campaignObj) {
+        isValueBased = campaignObj.isValueBasedStrategy || false;
+      } else {
+        // If we can't find the campaign in campaignData, try to determine directly
+        const bidStrategy = getEffectiveBiddingStrategy({campaign: campaign, name: campaign.getName()}, campaignData);
+        isValueBased = isValueBasedStrategy(bidStrategy);
+      }
+    }
+    
+    // Get conversion data using the proper method based on configuration
     let query;
     if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
       // Use the specialized query for specific conversion actions
@@ -328,7 +344,8 @@ function getDayOfWeekPerformance(campaign, dateRange) {
         SELECT 
           segments.date,
           segments.conversion_action_name,
-          metrics.all_conversions
+          metrics.all_conversions,
+          metrics.all_conversions_value
         FROM campaign 
         WHERE 
           campaign.id = ${campaign.getId()} 
@@ -339,7 +356,8 @@ function getDayOfWeekPerformance(campaign, dateRange) {
       query = `
         SELECT 
           segments.date,
-          metrics.conversions
+          metrics.conversions,
+          metrics.conversions_value
         FROM campaign 
         WHERE 
           campaign.id = ${campaign.getId()} 
@@ -363,31 +381,56 @@ function getDayOfWeekPerformance(campaign, dateRange) {
       );
       const dayOfWeek = date.getDay();
       
-      // Only count conversions for the specific action if configured
+      // Get conversion metrics based on configuration
       let conversions = 0;
+      let conversionValue = 0;
+      
       if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
         const actionName = row['segments.conversion_action_name'] || '';
         if (actionName === CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME) {
           conversions = parseFloat(row['metrics.all_conversions']) || 0;
+          conversionValue = parseFloat(row['metrics.all_conversions_value']) || 0;
         }
       } else {
         conversions = parseFloat(row['metrics.conversions']) || 0;
+        conversionValue = parseFloat(row['metrics.conversions_value']) || 0;
+        
+        // If conversion value is not available, use the estimated value
+        if (!conversionValue && conversions > 0) {
+          conversionValue = conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE;
+        }
       }
       
       // Add to the appropriate day
       dayPerformance[dayOfWeek].conversions += conversions;
+      dayPerformance[dayOfWeek].conversionValue += conversionValue;
       dayPerformance[dayOfWeek].days += 1;
     }
     
-    // Calculate average daily conversions for each day
+    // Calculate average daily conversions/value for each day
     for (let i = 0; i < 7; i++) {
       const day = dayPerformance[i];
       if (day.days > 0) {
         day.avgDailyConversions = day.conversions / day.days;
+        day.avgDailyConversionValue = day.conversionValue / day.days;
+      } else {
+        day.avgDailyConversions = 0;
+        day.avgDailyConversionValue = 0;
       }
     }
     
-    return dayPerformance;
+    // Log whether we're using value-based analysis for this campaign
+    if (isValueBased) {
+      Logger.log(`Using value-based day-of-week analysis for campaign ${campaign.getName()}`);
+    } else {
+      Logger.log(`Using volume-based day-of-week analysis for campaign ${campaign.getName()}`);
+    }
+    
+    // Add value-based flag to the returned object
+    return {
+      dayPerformance,
+      isValueBased
+    };
   } catch (e) {
     Logger.log(`Error in getDayOfWeekPerformance for campaign ${campaign.getName()}: ${e}`);
     return null;
@@ -395,7 +438,7 @@ function getDayOfWeekPerformance(campaign, dateRange) {
 }
 
 // Calculate day-of-week performance indices for a campaign
-function calculateDayOfWeekAdjustment(dayIndices) {
+function calculateDayOfWeekAdjustment(dayIndices, isValueBased) {
   try {
     // Safety check - if dayIndices is null or undefined, return neutral
     if (!dayIndices) {
@@ -460,9 +503,20 @@ function calculateDayOfWeekAdjustment(dayIndices) {
       };
     }
     
+    // Choose the appropriate index based on strategy type
+    const performanceIndex = isValueBased ? 
+      dayIndex.valueIndex || 1.0 : 
+      dayIndex.conversionIndex || 1.0;
+    
+    // Log which index we're using
+    Logger.log(`Using ${isValueBased ? 'value' : 'conversion'} index for day-of-week adjustment: ${performanceIndex.toFixed(2)}`);
+    
     // Validate the day-of-week pattern
-    // Ensure the validateDayOfWeekPattern function exists and handles null/undefined values
-    const patternValidation = validateDayOfWeekPattern(dayIndices, dayIndex.conversionIndex || 0);
+    // We need to collect the appropriate indices based on strategy type
+    const indicesForValidation = Object.values(dayIndices).map(day => 
+      isValueBased ? day.valueIndex : day.conversionIndex);
+    
+    const patternValidation = validateDayOfWeekPattern(indicesForValidation, performanceIndex);
     
     // If pattern is not significant, return neutral multiplier
     if (!patternValidation.isSignificant) {
@@ -477,8 +531,8 @@ function calculateDayOfWeekAdjustment(dayIndices) {
       };
     }
     
-    // Calculate multiplier based on conversion performance
-    let rawMultiplier = dayIndex.conversionIndex || 1.0;
+    // Calculate multiplier based on performance
+    let rawMultiplier = performanceIndex;
     
     // Adjust multiplier based on confidence and pattern strength
     const confidenceAdjustedMultiplier = 1.0 + 
@@ -496,212 +550,8 @@ function calculateDayOfWeekAdjustment(dayIndices) {
       appliedMultiplier: constrainedMultiplier,
       confidence: dayIndex.confidence,
       isSpecialEvent: false,
-      patternValidation
-    };
-  } catch (e) {
-    Logger.log(`Error calculating day-of-week adjustment: ${e}`);
-    return {
-      dayName: "Error",
-      rawMultiplier: 1.0,
-      appliedMultiplier: 1.0,
-      confidence: 0,
-      isSpecialEvent: false,
-      patternValidation: { isSignificant: false, reason: "Error in calculation" }
-    };
-  }
-}
-
-/**
- * Validates if a day-of-week pattern is statistically significant
- * @param {Object} dayIndices - The day indices object containing performance data
- * @return {Object} - Validation results including significance and pattern strength
- */
-function validateDayOfWeekPattern(dayIndices, conversionVolume) {
-  try {
-    // Safety check - if dayIndices is null or undefined, return not significant
-    if (!dayIndices) {
-      return {
-        isSignificant: false,
-        patternStrength: 0,
-        reason: "No day indices data available"
-      };
-    }
-    
-    // Ensure conversion volume is a number
-    conversionVolume = parseFloat(conversionVolume) || 0;
-    
-    // Get volume-based threshold
-    let threshold = CONFIG.CONVERSION_SETTINGS.VOLUME_BASED_THRESHOLDS.LOW.threshold;
-    if (conversionVolume >= CONFIG.CONVERSION_SETTINGS.VOLUME_BASED_THRESHOLDS.HIGH.min) {
-      threshold = CONFIG.CONVERSION_SETTINGS.VOLUME_BASED_THRESHOLDS.HIGH.threshold;
-    } else if (conversionVolume >= CONFIG.CONVERSION_SETTINGS.VOLUME_BASED_THRESHOLDS.MEDIUM.min) {
-      threshold = CONFIG.CONVERSION_SETTINGS.VOLUME_BASED_THRESHOLDS.MEDIUM.threshold;
-    }
-    
-    // Calculate pattern significance - safely handle the dayIndices object
-    const indices = Object.values(dayIndices)
-      .filter(day => day && typeof day === 'object' && 
-              day.sampleSize >= CONFIG.CONVERSION_SETTINGS.MIN_CONVERSIONS_FOR_PATTERN &&
-              typeof day.conversionIndex === 'number')
-      .map(day => day.conversionIndex);
-    
-    if (indices.length < 3) {
-      return {
-        isSignificant: false,
-        patternStrength: 0,
-        reason: "Insufficient days with data"
-      };
-    }
-    
-    const mean = indices.reduce((sum, val) => sum + val, 0) / indices.length;
-    const variance = indices.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / indices.length;
-    const stdDev = Math.sqrt(variance);
-    const patternStrength = mean > 0 ? stdDev / mean : 0;
-    
-    const isSignificant = patternStrength >= threshold && indices.length >= 3;
-    
-    return {
-      isSignificant,
-      patternStrength,
-      stdDev,
-      mean,
-      threshold,
-      reason: isSignificant ? 
-        `Pattern is significant (strength: ${patternStrength.toFixed(2)})` :
-        `Pattern is not significant (strength: ${patternStrength.toFixed(2)})`
-    };
-  } catch (e) {
-    Logger.log(`Error validating day-of-week pattern: ${e}`);
-    return {
-      isSignificant: false,
-      patternStrength: 0,
-      reason: "Error in validation: " + e.message
-    };
-  }
-}
-
-/**
- * Groups campaigns by their budget type (shared or individual)
- * @param {Array} campaigns - Array of campaign objects
- * @return {Object} Object containing arrays for shared budget groups and individual campaigns
- */
-function groupCampaignsByBudget(campaigns) {
-  const sharedBudgetGroups = {};
-  const individualCampaigns = [];
-  
-  // First identify campaigns by their budget ID pattern
-  campaigns.forEach(campaign => {
-    // Extract budget ID from campaign name if possible
-    const budgetMatch = campaign.name.match(/BUDGET\s+(\d+)/i);
-    const budgetId = budgetMatch ? `shared_budget_${budgetMatch[1]}` : null;
-    
-    // Add campaign.isSharedBudget property based on budget detection
-    campaign.isSharedBudget = !!budgetId;
-    campaign.sharedBudgetId = budgetId;
-    
-    if (campaign.isSharedBudget) {
-      if (!sharedBudgetGroups[budgetId]) {
-        sharedBudgetGroups[budgetId] = {
-          campaigns: [],
-          totalBudget: campaign.currentDailyBudget
-        };
-      }
-      sharedBudgetGroups[budgetId].campaigns.push(campaign);
-    } else {
-      individualCampaigns.push(campaign);
-    }
-  });
-  
-  return { sharedBudgetGroups, individualCampaigns };
-}
-
-// Modify calculateDayOfWeekAdjustment to use pattern validation
-function calculateDayOfWeekAdjustment(dayIndices) {
-  try {
-    // Get today's date in the account's timezone
-    const accountTimezone = AdsApp.currentAccount().getTimeZone();
-    const today = new Date();
-    const todayInAccountTimezone = Utilities.formatDate(today, accountTimezone, "yyyy-MM-dd");
-    
-    // Get day of week in account timezone (0-6, Sunday-Saturday)
-    const dayOfWeek = parseInt(Utilities.formatDate(today, accountTimezone, "u")) % 7;
-    
-    // Check if a special event is configured for today
-    const todayString = Utilities.formatDate(today, 'UTC', 'yyyy-MM-dd');
-    let specialEvent = null;
-    
-    for (const event of CONFIG.DAY_OF_WEEK.SPECIAL_EVENTS) {
-      if (event.date === todayString) {
-        specialEvent = event;
-        break;
-      }
-    }
-    
-    // If it's a special event, use that multiplier instead
-    if (specialEvent) {
-      Logger.log(`Today is a special event: ${specialEvent.name} with multiplier ${specialEvent.multiplier}`);
-      return {
-        dayName: `${dayIndices[dayOfWeek].name} (${specialEvent.name})`,
-        rawMultiplier: specialEvent.multiplier,
-        appliedMultiplier: specialEvent.multiplier,
-        confidence: 1.0,
-        isSpecialEvent: true,
-        specialEventName: specialEvent.name,
-        patternValidation: { isSignificant: true, reason: "Special event" }
-      };
-    }
-    
-    // Get the day's performance data
-    const dayIndex = dayIndices[dayOfWeek];
-    
-    // If we don't have enough data points, return neutral multiplier
-    if (!dayIndex || dayIndex.sampleSize < CONFIG.DAY_OF_WEEK.MIN_DATA_POINTS) {
-      return {
-        dayName: dayIndex ? dayIndex.name : "Unknown",
-        rawMultiplier: 1.0,
-        appliedMultiplier: 1.0,
-        confidence: 0,
-        isSpecialEvent: false,
-        patternValidation: { isSignificant: false, reason: "Insufficient data" }
-      };
-    }
-    
-    // Validate the day-of-week pattern
-    const patternValidation = validateDayOfWeekPattern(dayIndices, dayIndex.conversionIndex);
-    
-    // If pattern is not significant, return neutral multiplier
-    if (!patternValidation.isSignificant) {
-      Logger.log(`Day-of-week pattern not significant: ${patternValidation.reason}`);
-      return {
-        dayName: dayIndex.name,
-        rawMultiplier: 1.0,
-        appliedMultiplier: 1.0,
-        confidence: 0,
-        isSpecialEvent: false,
-        patternValidation
-      };
-    }
-    
-    // Calculate multiplier based on conversion performance
-    let rawMultiplier = dayIndex.conversionIndex;
-    
-    // Adjust multiplier based on confidence and pattern strength
-    const confidenceAdjustedMultiplier = 1.0 + 
-      ((rawMultiplier - 1.0) * dayIndex.confidence * patternValidation.patternStrength);
-    
-    // Constrain multiplier to configured limits
-    const constrainedMultiplier = Math.max(
-      CONFIG.DAY_OF_WEEK.MIN_DAY_MULTIPLIER,
-      Math.min(CONFIG.DAY_OF_WEEK.MAX_DAY_MULTIPLIER, confidenceAdjustedMultiplier)
-    );
-    
-    return {
-      dayName: dayIndex.name,
-      rawMultiplier: rawMultiplier,
-      appliedMultiplier: constrainedMultiplier,
-      confidence: dayIndex.confidence,
-      isSpecialEvent: false,
-      patternValidation
+      patternValidation,
+      isValueBased: isValueBased
     };
   } catch (e) {
     Logger.log(`Error calculating day-of-week adjustment: ${e}`);
@@ -721,7 +571,7 @@ function calculateDayOfWeekAdjustment(dayIndices) {
  * This function will extend the lookback period as needed until it finds enough reliable data
  * for the current day of the week or reaches the maximum allowed lookback period.
  */
-function getAdaptiveDayOfWeekData(campaign, purpose = 'main') {
+function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
   try {
     const campaignName = campaign.getName();
     
@@ -751,6 +601,19 @@ function getAdaptiveDayOfWeekData(campaign, purpose = 'main') {
     Logger.log(`\n=== Day-of-Week Analysis for ${campaignName} (${purpose}) ===`);
     Logger.log(`Analyzing performance for ${todayName} (${todayInAccountTimezone})`);
     
+    // First determine if this campaign uses a value-based strategy
+    let isValueBased = false;
+    if (campaignData && campaignData.campaigns) {
+      // Find the campaign in campaignData
+      const campaignObj = campaignData.campaigns.find(c => 
+        c.campaign && c.campaign.getId() === campaign.getId());
+      
+      if (campaignObj) {
+        isValueBased = campaignObj.isValueBasedStrategy || false;
+        Logger.log(`Campaign ${campaignName} uses a ${isValueBased ? 'value-based' : 'volume-based'} strategy`);
+      }
+    }
+    
     for (const threshold of confidenceThresholds) {
       while (currentLookback <= CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.MAX_TOTAL_LOOKBACK && 
              extensionsUsed < CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.MAX_EXTENSIONS) {
@@ -766,12 +629,16 @@ function getAdaptiveDayOfWeekData(campaign, purpose = 'main') {
         };
         
         // Get performance data for this lookback period
-        const performance = getDayOfWeekPerformance(campaign, dateRange);
+        const performance = getDayOfWeekPerformance(campaign, dateRange, campaignData);
         
         // Safely calculate indices if performance data exists
         let indices = null;
         if (performance) {
           indices = calculateDayOfWeekIndices(performance);
+          // Add the value-based flag to the indices object
+          if (indices) {
+            indices.isValueBased = performance.isValueBased || isValueBased;
+          }
         } else {
           // Skip to next iteration if no performance data
           lookbackAttempts.push({
@@ -988,14 +855,27 @@ function formatDateRange(startDate, endDate) {
   };
 }
 
-function calculateDayOfWeekIndices(dayPerformance) {
+function calculateDayOfWeekIndices(dayPerformanceData) {
   try {
+    // Handle the new format from getDayOfWeekPerformance
+    const dayPerformance = dayPerformanceData.dayPerformance;
+    const isValueBased = dayPerformanceData.isValueBased || false;
+    
+    // Log which type of analysis we're using
+    if (isValueBased) {
+      Logger.log("Calculating day-of-week indices using conversion VALUE");
+    } else {
+      Logger.log("Calculating day-of-week indices using conversion VOLUME");
+    }
+    
     // Calculate overall daily averages across all days
     let totalConversions = 0;
+    let totalConversionValue = 0;
     let totalDays = 0;
     
     for (let i = 0; i < 7; i++) {
       totalConversions += dayPerformance[i].conversions;
+      totalConversionValue += dayPerformance[i].conversionValue;
       totalDays += dayPerformance[i].days;
     }
     
@@ -1078,7 +958,8 @@ function collectCampaignData(dateRange, dowDateRange) {
       if (processedCount >= batchSize) break;
       
       try {
-        const campaignData = processCampaignData(campaign, dateRange, dowDateRange);
+        // Pass data as the campaignData parameter
+        const campaignData = processCampaignData(campaign, dateRange, dowDateRange, data);
         if (campaignData) {
           data.campaigns.push(campaignData);
           data.totalBudget += campaignData.currentDailyBudget;
@@ -1113,7 +994,7 @@ function collectCampaignData(dateRange, dowDateRange) {
 }
 
 // Update processCampaignData to properly handle conversions and shared budgets
-function processCampaignData(campaign, dateRange, dowDateRange) {
+function processCampaignData(campaign, dateRange, dowDateRange, campaignData) {
   try {
     const stats = campaign.getStatsFor(dateRange.start, dateRange.end);
     const budget = campaign.getBudget();
@@ -1166,11 +1047,13 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       conversionValue = conversionData.conversionValue;
     } else {
       conversions = stats.getConversions();
-      conversionValue = conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE;
+      conversionValue = stats.getConversionValue ? stats.getConversionValue() : 
+                      (conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE);
     }
     
     // Get recent conversions
     let recentConversions = 0;
+    let recentConversionValue = 0;
     if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
       const endDate = new Date();
       const startDate = new Date();
@@ -1187,6 +1070,7 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
         CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME
       );
       recentConversions = recentData.conversions;
+      recentConversionValue = recentData.conversionValue;
     } else {
       const endDate = new Date();
       const startDate = new Date();
@@ -1199,6 +1083,8 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       
       const recentStats = campaign.getStatsFor(recentDateRange.start, recentDateRange.end);
       recentConversions = recentStats.getConversions();
+      recentConversionValue = recentStats.getConversionValue ? recentStats.getConversionValue() : 
+                            (recentConversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE);
     }
     
     // Get performance metrics
@@ -1216,7 +1102,8 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
     
     if (CONFIG.DAY_OF_WEEK.ENABLED) {
       try {
-        dayOfWeekData = getDayOfWeekData(campaign, dowDateRange);
+        // Pass the campaignData parameter here to avoid the reference error
+        dayOfWeekData = getDayOfWeekData(campaign, dowDateRange, campaignData || {});
         
         if (dayOfWeekData && dayOfWeekData.adjustment) {
           dayOfWeekAdjustment = dayOfWeekData.adjustment;
@@ -1239,6 +1126,7 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       clicks,
       impressions,
       recentConversions,
+      recentConversionValue,
       impressionShare,
       budgetImpressionShareLost,
       dayOfWeekData,
@@ -1363,10 +1251,11 @@ function safeCalculateAdjustment(campaign, factors) {
   }
 }
 
-function getDayOfWeekData(campaign, dowDateRange) {
+function getDayOfWeekData(campaign, dowDateRange, campaignData) {
   try {
     if (CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.ENABLED) {
-      const adaptiveData = getAdaptiveDayOfWeekData(campaign, 'main');
+      // Ensure campaignData is always defined by providing a default empty object
+      const adaptiveData = getAdaptiveDayOfWeekData(campaign, campaignData || {}, 'main');
       
       // Check if adaptiveData is null (error occurred)
       if (!adaptiveData) {
@@ -1399,7 +1288,8 @@ function getDayOfWeekData(campaign, dowDateRange) {
       };
     } else {
       // Standard non-adaptive approach
-      const performance = getDayOfWeekPerformance(campaign, dowDateRange);
+      // Ensure campaignData is passed to getDayOfWeekPerformance
+      const performance = getDayOfWeekPerformance(campaign, dowDateRange, campaignData || {});
       
       // Handle case where performance data is null
       if (!performance) {
@@ -1433,7 +1323,11 @@ function getDayOfWeekData(campaign, dowDateRange) {
         };
       }
       
-      const adjustment = calculateDayOfWeekAdjustment(indices.dayIndices);
+      // Determine if this is a value-based strategy from the indices
+      const isValueBased = indices.isValueBased || false;
+      
+      // Pass the value-based flag to the adjustment calculation
+      const adjustment = calculateDayOfWeekAdjustment(indices.dayIndices, isValueBased);
       
       return { 
         performance, 
@@ -1511,73 +1405,71 @@ function getImpressionShare(campaign, dateRange) {
 
 function calculateTrendFactor(campaign) {
   try {
+    // Check if this is a value-based strategy - set by calculateTrendFactorsForAll
+    const isValueBased = campaign.isValueBasedStrategy || false;
+    
+    // For value-based strategies, consider conversion value trends
+    if (isValueBased) {
+      // Log that we're using value-based calculations
+      Logger.log(`Using value-based trend calculations for campaign '${campaign.name}'`);
+      
+      // Get recent conversion value (21 days)
+      const recentValue = campaign.recentConversionValue || 0;
+      
+      // Scale to equivalent 90-day rate for comparison
+      const recentValueRate = recentValue * (CONFIG.LOOKBACK_PERIOD / CONFIG.RECENT_PERFORMANCE_PERIOD);
+      
+      // Calculate conversion value trend (>1 means improving, <1 means declining)
+      let conversionValueTrend = 1.0; // Default to neutral
+      
+      if (campaign.conversionValue > 0) {
+        conversionValueTrend = Math.min(2.0, Math.max(0.5, recentValueRate / campaign.conversionValue));
+      } else if (recentValue > 0) {
+        // No 90-day value but some recent value - positive trend
+        conversionValueTrend = 1.5; // Moderate boost
+      } else {
+        // No conversion value in either period - slightly negative
+        conversionValueTrend = 0.8; // Larger penalty for no value
+      }
+      
+      // For logging purposes, still calculate the volume trend
+      const volumeTrend = calculateVolumeTrendFactor(campaign);
+      
+      // Calculate efficiency trend - already using value-based calculation from calculateTrendFactorsForAll
+      let efficiencyTrend = calculateEfficiencyTrendFactor(campaign);
+      
+      // Consider the impression share lost to budget
+      let impressionShareFactor = calculateImpressionShareFactor(campaign);
+      
+      // Combine factors with different weights, emphasizing value trend more
+      const combinedFactor = (conversionValueTrend * 0.4) + (efficiencyTrend * 0.4) + (impressionShareFactor * 0.2);
+      
+      // Limit the final trend factor to a reasonable range (0.5 to 2.0)
+      const finalTrendFactor = Math.min(2.0, Math.max(0.5, combinedFactor));
+      
+      // Log the calculation components for value-based evaluation
+      Logger.log(`Trend calculation for '${campaign.name}' (VALUE-BASED): 
+        - Conversion VALUE trend: ${conversionValueTrend.toFixed(2)} (${CONFIG.RECENT_PERFORMANCE_PERIOD}-day: ${recentValue.toFixed(2)}, 90-day: ${(campaign.conversionValue || 0).toFixed(2)})
+        - Volume trend (for reference): ${volumeTrend.toFixed(2)}
+        - Efficiency trend: ${efficiencyTrend.toFixed(2)} (Recent: ${campaign.recentEfficiencyRatio ? campaign.recentEfficiencyRatio.toFixed(2) : "N/A"}, 90-day: ${campaign.longTermEfficiencyRatio ? campaign.longTermEfficiencyRatio.toFixed(2) : "N/A"})
+        - Impression share factor: ${impressionShareFactor.toFixed(2)} (IS Lost: ${campaign.budgetImpressionShareLost.toFixed(2)}%)
+        - Final trend factor: ${finalTrendFactor.toFixed(2)}`);
+      
+      return finalTrendFactor;
+    }
+    
+    // For volume-based strategies, use the original calculation
     // Get recent conversions (21 days)
     const recentConvs = campaign.recentConversions;
     
-    // Scale to equivalent 90-day rate for comparison
-    const recentRate = recentConvs * (CONFIG.LOOKBACK_PERIOD / CONFIG.RECENT_PERFORMANCE_PERIOD);
+    // Calculate volume trend factor
+    const conversionTrend = calculateVolumeTrendFactor(campaign);
     
-    // Calculate conversion volume trend (>1 means improving, <1 means declining)
-    let conversionTrend = 1.0; // Default to neutral
+    // Calculate efficiency trend factor
+    const efficiencyTrend = calculateEfficiencyTrendFactor(campaign);
     
-    if (campaign.conversions > 0) {
-      conversionTrend = Math.min(2.0, Math.max(0.5, recentRate / campaign.conversions));
-    } else if (recentConvs > 0) {
-      // No 90-day conversions but some recent conversions - positive trend
-      conversionTrend = 1.5; // Moderate boost
-    } else {
-      // No conversions in either period - slightly negative
-      conversionTrend = 0.8; // Larger penalty for no conversions
-    }
-    
-    // Calculate efficiency trend - compare recent vs. 90-day efficiency
-    // (Get recent cost for the same period as recent conversions)
-    const recentCost = getRecentCost(campaign.campaign, CONFIG.RECENT_PERFORMANCE_PERIOD);
-    campaign.recentCost = recentCost; // Store for logging
-    
-    // Calculate efficiency ratios (share of conversions / share of cost)
-    // These values will be available from calculateTrendFactorForAll after that function has run
-    let efficiencyTrend = 1.0; // Default to neutral
-    
-    if (campaign.recentEfficiencyRatio && campaign.longTermEfficiencyRatio) {
-      // If efficiency is improving, boost the trend factor
-      if (campaign.recentEfficiencyRatio > campaign.longTermEfficiencyRatio) {
-        efficiencyTrend = Math.min(1.5, Math.max(1.0, 
-          campaign.recentEfficiencyRatio / Math.max(0.1, campaign.longTermEfficiencyRatio)));
-      } 
-      // If efficiency is declining, reduce the trend factor more aggressively
-      else if (campaign.recentEfficiencyRatio < campaign.longTermEfficiencyRatio) {
-        // Calculate the decline ratio (how much worse it's getting)
-        const declineRatio = campaign.recentEfficiencyRatio / Math.max(0.1, campaign.longTermEfficiencyRatio);
-        
-        // Apply a more severe penalty for efficiency decline
-        efficiencyTrend = Math.max(0.4, Math.min(1.0, declineRatio * 0.8));
-      }
-      
-      // If recent efficiency ratio is very poor, apply an even stronger penalty
-      if (campaign.recentEfficiencyRatio < 0.7) {
-        efficiencyTrend = Math.min(efficiencyTrend, 0.7);
-      }
-      
-      // If the campaign has BOTH declining efficiency AND was previously efficient,
-      // apply an even stronger penalty (this targets previously good campaigns that are declining)
-      if (campaign.recentEfficiencyRatio < campaign.longTermEfficiencyRatio && 
-          campaign.longTermEfficiencyRatio > 1.0) {
-        efficiencyTrend = Math.min(efficiencyTrend, 0.6);
-      }
-    }
-    
-    // Consider the impression share lost to budget - be more cautious with budget increases
-    // when impression share lost is low
-	let impressionShareFactor = 1.0;
-	// For higher impression share loss, give higher factor (more budget)
-	if (campaign.budgetImpressionShareLost > 50) {
-	  impressionShareFactor = 1.0 + (Math.min(campaign.budgetImpressionShareLost, 80) - 50) / 100;
-	} 
-	// For lower impression share loss, reduce factor (less budget)
-	else if (campaign.budgetImpressionShareLost < 30) {
-	  impressionShareFactor = 0.8 + (campaign.budgetImpressionShareLost / 150);
-	}
+    // Calculate impression share factor
+    const impressionShareFactor = calculateImpressionShareFactor(campaign);
     
     // Combine factors with different weights
     // Give efficiency trend a higher weight to prioritize efficiency
@@ -1587,7 +1479,7 @@ function calculateTrendFactor(campaign) {
     const finalTrendFactor = Math.min(2.0, Math.max(0.5, combinedFactor));
     
     // Log the calculation components for transparency
-    Logger.log(`Trend calculation for '${campaign.name}': 
+    Logger.log(`Trend calculation for '${campaign.name}' (VOLUME-BASED): 
       - Conversion trend: ${conversionTrend.toFixed(2)} (${CONFIG.RECENT_PERFORMANCE_PERIOD}-day: ${recentConvs.toFixed(2)}, 90-day: ${campaign.conversions.toFixed(2)})
       - Efficiency trend: ${efficiencyTrend.toFixed(2)} (Recent: ${campaign.recentEfficiencyRatio ? campaign.recentEfficiencyRatio.toFixed(2) : "N/A"}, 90-day: ${campaign.longTermEfficiencyRatio ? campaign.longTermEfficiencyRatio.toFixed(2) : "N/A"})
       - Impression share factor: ${impressionShareFactor.toFixed(2)} (IS Lost: ${campaign.budgetImpressionShareLost.toFixed(2)}%)
@@ -1600,6 +1492,87 @@ function calculateTrendFactor(campaign) {
   }
 }
 
+/**
+ * Helper function to calculate conversion volume trend
+ */
+function calculateVolumeTrendFactor(campaign) {
+  // Get recent conversions (21 days)
+  const recentConvs = campaign.recentConversions;
+  
+  // Scale to equivalent 90-day rate for comparison
+  const recentRate = recentConvs * (CONFIG.LOOKBACK_PERIOD / CONFIG.RECENT_PERFORMANCE_PERIOD);
+  
+  // Calculate conversion volume trend (>1 means improving, <1 means declining)
+  let conversionTrend = 1.0; // Default to neutral
+  
+  if (campaign.conversions > 0) {
+    conversionTrend = Math.min(2.0, Math.max(0.5, recentRate / campaign.conversions));
+  } else if (recentConvs > 0) {
+    // No 90-day conversions but some recent conversions - positive trend
+    conversionTrend = 1.5; // Moderate boost
+  } else {
+    // No conversions in either period - slightly negative
+    conversionTrend = 0.8; // Larger penalty for no conversions
+  }
+  
+  return conversionTrend;
+}
+
+/**
+ * Helper function to calculate efficiency trend
+ */
+function calculateEfficiencyTrendFactor(campaign) {
+  let efficiencyTrend = 1.0; // Default to neutral
+  
+  if (campaign.recentEfficiencyRatio && campaign.longTermEfficiencyRatio) {
+    // If efficiency is improving, boost the trend factor
+    if (campaign.recentEfficiencyRatio > campaign.longTermEfficiencyRatio) {
+      efficiencyTrend = Math.min(1.5, Math.max(1.0, 
+        campaign.recentEfficiencyRatio / Math.max(0.1, campaign.longTermEfficiencyRatio)));
+    } 
+    // If efficiency is declining, reduce the trend factor more aggressively
+    else if (campaign.recentEfficiencyRatio < campaign.longTermEfficiencyRatio) {
+      // Calculate the decline ratio (how much worse it's getting)
+      const declineRatio = campaign.recentEfficiencyRatio / Math.max(0.1, campaign.longTermEfficiencyRatio);
+      
+      // Apply a more severe penalty for efficiency decline
+      efficiencyTrend = Math.max(0.4, Math.min(1.0, declineRatio * 0.8));
+    }
+    
+    // If recent efficiency ratio is very poor, apply an even stronger penalty
+    if (campaign.recentEfficiencyRatio < 0.7) {
+      efficiencyTrend = Math.min(efficiencyTrend, 0.7);
+    }
+    
+    // If the campaign has BOTH declining efficiency AND was previously efficient,
+    // apply an even stronger penalty (this targets previously good campaigns that are declining)
+    if (campaign.recentEfficiencyRatio < campaign.longTermEfficiencyRatio && 
+        campaign.longTermEfficiencyRatio > 1.0) {
+      efficiencyTrend = Math.min(efficiencyTrend, 0.6);
+    }
+  }
+  
+  return efficiencyTrend;
+}
+
+/**
+ * Helper function to calculate impression share factor
+ */
+function calculateImpressionShareFactor(campaign) {
+  let impressionShareFactor = 1.0;
+  
+  // For higher impression share loss, give higher factor (more budget)
+  if (campaign.budgetImpressionShareLost > 50) {
+    impressionShareFactor = 1.0 + (Math.min(campaign.budgetImpressionShareLost, 80) - 50) / 100;
+  } 
+  // For lower impression share loss, reduce factor (less budget)
+  else if (campaign.budgetImpressionShareLost < 30) {
+    impressionShareFactor = 0.8 + (campaign.budgetImpressionShareLost / 150);
+  }
+  
+  return impressionShareFactor;
+}
+
 function logCurrentBudgetStatus(campaignData) {
   try {
     if (!campaignData || !campaignData.campaigns) {
@@ -1608,34 +1581,94 @@ function logCurrentBudgetStatus(campaignData) {
     }
 
     Logger.log("\n===== CURRENT CAMPAIGN BUDGET STATUS =====");
-    Logger.log(`Showing data for specific conversion action: "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
-    Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Conv Ratio, 21-Day Convs, 90-Day Convs, Trend Factor, 90-Day Efficiency, Recent Efficiency");
     
+    // Update message to show if we're using specific or default conversion actions
+    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
+      Logger.log(`Showing data for specific conversion action: "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
+    } else {
+      Logger.log("Showing data for default conversion actions from Google Ads");
+    }
+    
+    // Create column headers based on bidding strategies in use
+    // Check if we have any value-based campaigns
+    const hasValueBasedCampaigns = campaignData.campaigns.some(c => c.isValueBasedStrategy);
+    const hasVolumeBasedCampaigns = campaignData.campaigns.some(c => !c.isValueBasedStrategy);
+    
+    // Create appropriate column headers
+    if (hasValueBasedCampaigns && hasVolumeBasedCampaigns) {
+      // Mixed strategies - show both metrics
+      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Conv Ratio, Budget/Value Ratio, 21-Day Convs, 90-Day Convs, 21-Day Value, 90-Day Value, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+    } else if (hasValueBasedCampaigns) {
+      // Only value-based strategies
+      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Value Ratio, 21-Day Value, 90-Day Value, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+    } else {
+      // Only volume-based strategies (or unknown)
+      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Conv Ratio, 21-Day Convs, 90-Day Convs, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+    }
+    
+    // Calculate totals for ratios
     const totalConversions = campaignData.totalConversions || 0;
+    const totalConversionValue = campaignData.campaigns.reduce((sum, c) => sum + (c.conversionValue || 0), 0);
     
     for (const campaign of campaignData.campaigns) {
       try {
+        const isValueBased = campaign.isValueBasedStrategy || false;
         const budgetConvRatio = totalConversions > 0 ? 
           (campaign.currentDailyBudget / totalConversions) : 0;
+        const budgetValueRatio = totalConversionValue > 0 ? 
+          (campaign.currentDailyBudget / totalConversionValue) * 100 : 0; // Show as percentage of value
         
         const trendFactor = campaign.trendFactor || 1.0;
-        
-        // Fix: Use the correct property names
         const efficiency90Day = campaign.longTermEfficiencyRatio || 0;
         const recentEfficiency = campaign.recentEfficiencyRatio || 0;
         
-        Logger.log(
-          `${campaign.name}, ` +
-          `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
-          `${campaign.optimizationObjective || 'N/A'}, ` +
-          `$${campaign.currentDailyBudget.toFixed(2)}, ` +
-          `$${budgetConvRatio.toFixed(2)}, ` +
-          `${campaign.recentConversions || 0}, ` +
-          `${campaign.conversions || 0}, ` +
-          `${trendFactor.toFixed(2)}, ` +
-          `${efficiency90Day.toFixed(2)}, ` +
-          `${recentEfficiency.toFixed(2)}`
-        );
+        // Build log output depending on strategy type
+        if (hasValueBasedCampaigns && hasVolumeBasedCampaigns) {
+          // Mixed environment - show all data
+          Logger.log(
+            `${campaign.name}, ` +
+            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
+            `${campaign.optimizationObjective || 'N/A'}, ` +
+            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
+            `$${budgetConvRatio.toFixed(2)}, ` +
+            `${budgetValueRatio.toFixed(2)}%, ` +
+            `${campaign.recentConversions || 0}, ` +
+            `${campaign.conversions || 0}, ` +
+            `${campaign.recentConversionValue || 0}, ` +
+            `${campaign.conversionValue || 0}, ` +
+            `${trendFactor.toFixed(2)}, ` +
+            `${efficiency90Day.toFixed(2)}, ` +
+            `${recentEfficiency.toFixed(2)}`
+          );
+        } else if (isValueBased) {
+          // Value-based only
+          Logger.log(
+            `${campaign.name}, ` +
+            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
+            `${campaign.optimizationObjective || 'N/A'}, ` +
+            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
+            `${budgetValueRatio.toFixed(2)}%, ` +
+            `${campaign.recentConversionValue || 0}, ` +
+            `${campaign.conversionValue || 0}, ` +
+            `${trendFactor.toFixed(2)}, ` +
+            `${efficiency90Day.toFixed(2)}, ` +
+            `${recentEfficiency.toFixed(2)}`
+          );
+        } else {
+          // Volume-based only (default)
+          Logger.log(
+            `${campaign.name}, ` +
+            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
+            `${campaign.optimizationObjective || 'N/A'}, ` +
+            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
+            `$${budgetConvRatio.toFixed(2)}, ` +
+            `${campaign.recentConversions || 0}, ` +
+            `${campaign.conversions || 0}, ` +
+            `${trendFactor.toFixed(2)}, ` +
+            `${efficiency90Day.toFixed(2)}, ` +
+            `${recentEfficiency.toFixed(2)}`
+          );
+        }
       } catch (e) {
         Logger.log(`Error logging campaign ${campaign.name}: ${e}`);
         continue;
@@ -2226,7 +2259,17 @@ function calculateFuturePerformanceScore(campaign) {
 
 // Add this new function before processCampaignBudgets
 function processPortfolioBidStrategies(campaignData) {
-  // Check if we have any portfolio strategies to process
+  // Call the new function if it exists, otherwise fall back to legacy behavior
+  if (typeof processPortfolioStrategies === 'function') {
+    try {
+      Logger.log("Using enhanced portfolio strategy processor");
+      return processPortfolioStrategies(campaignData);
+    } catch (e) {
+      Logger.log(`Error using enhanced portfolio processor: ${e}. Falling back to legacy method.`);
+    }
+  }
+
+  // Legacy implementation (original code)
   if (!campaignData.portfolioStrategies || Object.keys(campaignData.portfolioStrategies).length === 0) {
     Logger.log("No portfolio bid strategies found to process");
     return;
@@ -2261,27 +2304,39 @@ function processPortfolioBidStrategies(campaignData) {
       const campaignId = campaignInfo.id;
       
       // Find this campaign in our main dataset
-      for (const campaign of campaignData.campaigns) {
-        if (campaign.campaign.getId() === campaignId) {
-          totalConversions += campaign.conversions || 0;
-          totalCost += campaign.cost || 0;
-          totalImpressionShareLost += campaign.budgetImpressionShareLost || 0;
-          totalBudget += campaign.currentDailyBudget || 0;
-          
-          if (campaign.trendFactor) {
-            totalTrendFactor += campaign.trendFactor;
-            campaignsWithData++;
+      let found = false;
+      if (campaignData && Array.isArray(campaignData.campaigns)) {
+        for (const campaign of campaignData.campaigns) {
+          try {
+            if (campaign.campaign.getId() === campaignId) {
+              totalConversions += campaign.conversions || 0;
+              totalCost += campaign.cost || 0;
+              totalImpressionShareLost += campaign.budgetImpressionShareLost || 0;
+              totalBudget += campaign.currentDailyBudget || 0;
+              
+              if (campaign.trendFactor) {
+                totalTrendFactor += campaign.trendFactor;
+                campaignsWithData++;
+              }
+              
+              found = true;
+              break;
+            }
+          } catch (e) {
+            Logger.log(`Error processing campaign in portfolio: ${e}`);
           }
-          
-          break;
         }
+      }
+      
+      if (!found) {
+        Logger.log(`Campaign with ID ${campaignId} not found in analysis data`);
       }
     }
     
     // Calculate averages
     const avgImpressionShareLost = campaignsWithData > 0 ? totalImpressionShareLost / campaignsWithData : 0;
     const avgTrendFactor = campaignsWithData > 0 ? totalTrendFactor / campaignsWithData : 1.0;
-    const avgBudget = strategy.campaigns.length > 0 ? totalBudget / strategy.campaigns.length : 0;
+    const avgBudget = strategy.campaigns && strategy.campaigns.length > 0 ? totalBudget / strategy.campaigns.length : 0;
     
     // Log portfolio performance
     Logger.log(`Portfolio "${strategyName}" performance:`);
@@ -2341,18 +2396,56 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
     // Process shared budgets first if they exist
     let sharedBudgetsProcessed = 0;
     if (campaignData.sharedBudgetData && Object.keys(campaignData.sharedBudgetData).length > 0) {
-      Logger.log("\n===== PROCESSING SHARED BUDGETS =====");
+      const budgetIds = Object.keys(campaignData.sharedBudgetData);
       
+      // First, log a summary of all shared budgets
+      Logger.log("\n=========== SHARED BUDGET OVERVIEW ===========");
+      Logger.log(`Total shared budgets found in account: ${budgetIds.length}`);
+      
+      // Collect empty budgets first
+      const emptyBudgets = [];
+      const activeBudgets = [];
+      
+      for (const budgetId of budgetIds) {
+        const budget = campaignData.sharedBudgetData[budgetId];
+        if (!budget.campaigns || budget.campaigns.length === 0) {
+          emptyBudgets.push({id: budgetId, name: budget.name, amount: budget.amount});
+        } else {
+          activeBudgets.push({id: budgetId, name: budget.name, amount: budget.amount, campaigns: budget.campaigns.length});
+        }
+      }
+      
+      // Log empty budgets in a separate section
+      if (emptyBudgets.length > 0) {
+        Logger.log("\n----- EMPTY SHARED BUDGETS (WILL BE SKIPPED) -----");
+        for (const budget of emptyBudgets) {
+          Logger.log(`  • ID: ${budget.id} | Name: "${budget.name}" | Amount: $${budget.amount.toFixed(2)}`);
+        }
+        Logger.log(`  Total: ${emptyBudgets.length} empty shared budgets will be skipped`);
+        Logger.log("---------------------------------------------------");
+      }
+      
+      // Log active budgets that will be processed
+      Logger.log("\n----- ACTIVE SHARED BUDGETS (WILL BE PROCESSED) -----");
+      for (const budget of activeBudgets) {
+        Logger.log(`  • ID: ${budget.id} | Name: "${budget.name}" | Amount: $${budget.amount.toFixed(2)} | Campaigns: ${budget.campaigns}`);
+      }
+      Logger.log(`  Total: ${activeBudgets.length} active shared budgets will be processed`);
+      Logger.log("-----------------------------------------------------");
+      Logger.log("=====================================================\n");
+      
+      // Process each active shared budget
       for (const budgetId in campaignData.sharedBudgetData) {
         const budgetGroup = campaignData.sharedBudgetData[budgetId];
         
         // Skip empty budget groups
         if (!budgetGroup.campaigns || budgetGroup.campaigns.length === 0) {
-          Logger.log(`Shared budget ${budgetGroup.name} has no campaigns - skipping`);
+          // Skip silently since we already logged empty budgets above
           continue;
         }
         
-        Logger.log(`\nProcessing shared budget "${budgetGroup.name}" with ${budgetGroup.campaigns.length} campaigns`);
+        // Clear section break for each budget
+        Logger.log(`\n===== PROCESSING SHARED BUDGET: "${budgetGroup.name}" (ID: ${budgetId}) =====`);
         
         // Calculate aggregate metrics for this budget group
         let totalTrendFactor = 0;
@@ -2361,7 +2454,8 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         let weightedImpShareLost = 0;
         let validCampaigns = 0;
         
-        Logger.log(`  Processing ${budgetGroup.campaigns.length} campaigns in shared budget`);
+        Logger.log(`Processing ${budgetGroup.campaigns.length} campaigns in this shared budget:`);
+        
         // Calculate aggregate metrics from all campaigns in this shared budget
         for (const campaignInfo of budgetGroup.campaigns) {
           try {
@@ -2444,31 +2538,113 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         const newBudgetAmount = currentAmount * adjustmentFactor;
         
         // Log the proposed change
-        Logger.log(`Adjustments for shared budget "${budgetGroup.name}":`);
-        Logger.log(`  - Current budget: ${currentAmount.toFixed(2)}`);
-        Logger.log(`  - Proposed adjustment: ${adjustmentFactor.toFixed(2)}`);
-        Logger.log(`  - Final budget: ${newBudgetAmount.toFixed(2)}`);
+        Logger.log(`\nBudget Adjustment Calculation for "${budgetGroup.name}":`);
+        Logger.log(`  - Current budget: $${currentAmount.toFixed(2)}`);
+        Logger.log(`  - Proposed adjustment factor: ${adjustmentFactor.toFixed(2)}`);
+        Logger.log(`  - Final budget: $${newBudgetAmount.toFixed(2)}`);
         Logger.log(`  - Reason: ${adjustmentReason.join(", ")}`);
         
+        // Store the proposed adjustment for later application
+        budgetGroup.proposedAmount = newBudgetAmount;
+        budgetGroup.currentAmount = currentAmount;
+        budgetGroup.adjustmentFactor = adjustmentFactor;
+        budgetGroup.adjustmentReason = adjustmentReason.join(", ");
+        
+        // Add clear end boundary
+        Logger.log(`===== COMPLETED SHARED BUDGET: "${budgetGroup.name}" =====\n`);
+      }
+      
+      // NEW CODE: Calculate total current and proposed budgets to determine if scaling is needed
+      let totalCurrentSharedBudget = 0;
+      let totalProposedSharedBudget = 0;
+      let budgetsToAdjust = [];
+      
+      // Calculate totals
+      for (const budgetId in campaignData.sharedBudgetData) {
+        const budgetGroup = campaignData.sharedBudgetData[budgetId];
+        
+        // Skip empty budget groups
+        if (!budgetGroup.campaigns || budgetGroup.campaigns.length === 0) {
+          continue;
+        }
+        
+        totalCurrentSharedBudget += budgetGroup.currentAmount || 0;
+        totalProposedSharedBudget += budgetGroup.proposedAmount || 0;
+        budgetsToAdjust.push(budgetGroup);
+      }
+      
+      // Check if we need to scale the adjustments to stay within pacing limits
+      let scalingFactor = 1.0;
+      let scalingApplied = false;
+      
+      if (pacingInfo && pacingInfo.idealDailyRemaining && totalProposedSharedBudget > pacingInfo.idealDailyRemaining) {
+        scalingFactor = pacingInfo.idealDailyRemaining / totalProposedSharedBudget;
+        scalingApplied = true;
+        
+        Logger.log(`\n===== BUDGET PACING CONSTRAINT APPLIED =====`);
+        Logger.log(`Total proposed shared budgets: $${totalProposedSharedBudget.toFixed(2)}`);
+        Logger.log(`Ideal daily remaining budget: $${pacingInfo.idealDailyRemaining.toFixed(2)}`);
+        Logger.log(`Scaling factor applied: ${scalingFactor.toFixed(3)}`);
+        Logger.log(`============================================\n`);
+      }
+      
+      // Now apply all the budget adjustments with scaling if needed
+      let sharedBudgetsProcessed = 0;
+      let totalScaledBudget = 0;
+      
+      Logger.log(`\n===== APPLYING SHARED BUDGET ADJUSTMENTS =====`);
+      for (const budgetGroup of budgetsToAdjust) {
+        // Apply scaling if needed
+        let finalBudgetAmount = budgetGroup.proposedAmount;
+        if (scalingApplied) {
+          // Old formula (only scales the increase):
+          // finalBudgetAmount = budgetGroup.currentAmount + ((budgetGroup.proposedAmount - budgetGroup.currentAmount) * scalingFactor);
+          
+          // New formula (scales the entire proposed budget):
+          finalBudgetAmount = budgetGroup.proposedAmount * scalingFactor;
+          
+          // Log scaling details
+          Logger.log(`Scaling budget "${budgetGroup.name}":`);
+          Logger.log(`  - Original proposal: $${budgetGroup.proposedAmount.toFixed(2)}`);
+          Logger.log(`  - After pacing constraint: $${finalBudgetAmount.toFixed(2)}`);
+        }
+        
+        totalScaledBudget += finalBudgetAmount;
+        
         // Apply the budget change if significant enough
-        if (Math.abs(newBudgetAmount - currentAmount) / currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
+        if (Math.abs(finalBudgetAmount - budgetGroup.currentAmount) / budgetGroup.currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
           if (CONFIG.PREVIEW_MODE) {
-            Logger.log(`  [PREVIEW MODE: Shared budget would be updated from ${currentAmount.toFixed(2)} to ${newBudgetAmount.toFixed(2)}]`);
+            Logger.log(`  [PREVIEW MODE: Budget "${budgetGroup.name}" would be updated from $${budgetGroup.currentAmount.toFixed(2)} to $${finalBudgetAmount.toFixed(2)}]`);
           } else {
             try {
-              budgetGroup.budget.setAmount(newBudgetAmount);
-              Logger.log(`  [Shared budget updated successfully]`);
+              budgetGroup.budget.setAmount(finalBudgetAmount);
+              Logger.log(`  [Budget "${budgetGroup.name}" updated successfully to $${finalBudgetAmount.toFixed(2)}]`);
               sharedBudgetsProcessed++;
             } catch (e) {
-              Logger.log(`  [Error updating shared budget: ${e}]`);
+              Logger.log(`  [Error updating shared budget "${budgetGroup.name}": ${e}]`);
             }
           }
         } else {
-          Logger.log(`  [Change below minimum threshold of ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}% - not applied]`);
+          Logger.log(`  [Change for "${budgetGroup.name}" below minimum threshold of ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}% - not applied]`);
         }
       }
       
-      Logger.log(`\nShared budgets processed: ${sharedBudgetsProcessed}`);
+      Logger.log(`Total adjusted shared budget: $${totalScaledBudget.toFixed(2)}`);
+      Logger.log(`============================================\n`);
+      
+      // Add a final summary for all shared budgets
+      Logger.log("\n=========== SHARED BUDGET RESULTS ===========");
+      Logger.log(`Total shared budgets in account: ${budgetIds.length}`);
+      Logger.log(`Active shared budgets: ${activeBudgets.length}`);
+      Logger.log(`Empty shared budgets skipped: ${emptyBudgets.length}`);
+      Logger.log(`Shared budgets successfully updated: ${sharedBudgetsProcessed}`);
+      Logger.log(`Budget pacing constraint applied: ${scalingApplied ? "Yes" : "No"}`);
+      if (scalingApplied) {
+        Logger.log(`Original total proposed: $${totalProposedSharedBudget.toFixed(2)}`);
+        Logger.log(`Scaled total applied: $${totalScaledBudget.toFixed(2)}`);
+        Logger.log(`Savings from pacing constraint: $${(totalProposedSharedBudget - totalScaledBudget).toFixed(2)}`);
+      }
+      Logger.log("============================================\n");
     }
     
     // Process portfolio bid strategies
@@ -3135,17 +3311,25 @@ function getRecentCost(campaign, days) {
 function calculateTrendFactorsForAll(campaignData) {
   Logger.log("Calculating efficiency ratios and trend factors for all campaigns...");
   
-  // Calculate total conversions and costs for different time periods
+  // Calculate total conversions, conversion values, and costs for different time periods
   let totalLongTermConversions = 0;
+  let totalLongTermConversionValue = 0;
   let totalLongTermCost = 0;
   let totalRecentConversions = 0;
+  let totalRecentConversionValue = 0;
   let totalRecentCost = 0;
   
   // First, collect totals
   campaignData.campaigns.forEach(campaign => {
+    // Determine if this campaign uses a value-based bidding strategy
+    const bidStrategy = getEffectiveBiddingStrategy(campaign, campaignData);
+    campaign.isValueBasedStrategy = isValueBasedStrategy(bidStrategy);
+    
     totalLongTermConversions += campaign.conversions;
+    totalLongTermConversionValue += campaign.conversionValue || 0;
     totalLongTermCost += campaign.cost;
     totalRecentConversions += campaign.recentConversions;
+    totalRecentConversionValue += campaign.recentConversionValue || 0;
     
     // Get recent cost if we don't have it yet
     if (!campaign.recentCost) {
@@ -3157,28 +3341,55 @@ function calculateTrendFactorsForAll(campaignData) {
   
   // Then calculate efficiency ratios for each campaign
   campaignData.campaigns.forEach(campaign => {
-    // Calculate long-term efficiency ratio (share of conversions / share of cost)
-    if (totalLongTermCost > 0 && totalLongTermConversions > 0) {
-      const shareOfCost = campaign.cost / totalLongTermCost;
-      const shareOfConversions = campaign.conversions / totalLongTermConversions;
-      campaign.longTermEfficiencyRatio = shareOfCost > 0 ? shareOfConversions / shareOfCost : 0;
+    // For value-based strategies, use conversion value instead of conversion count
+    if (campaign.isValueBasedStrategy) {
+      // Calculate long-term efficiency ratio (share of conversion VALUE / share of cost)
+      if (totalLongTermCost > 0 && totalLongTermConversionValue > 0) {
+        const shareOfCost = campaign.cost / totalLongTermCost;
+        const shareOfValue = (campaign.conversionValue || 0) / totalLongTermConversionValue;
+        campaign.longTermEfficiencyRatio = shareOfCost > 0 ? shareOfValue / shareOfCost : 0;
+      } else {
+        campaign.longTermEfficiencyRatio = 0;
+      }
+      
+      // Calculate recent efficiency ratio based on conversion value
+      if (totalRecentCost > 0 && totalRecentConversionValue > 0) {
+        const shareOfRecentCost = campaign.recentCost / totalRecentCost;
+        const shareOfRecentValue = (campaign.recentConversionValue || 0) / totalRecentConversionValue;
+        campaign.recentEfficiencyRatio = shareOfRecentCost > 0 ? shareOfRecentValue / shareOfRecentCost : 0;
+      } else {
+        campaign.recentEfficiencyRatio = 0;
+      }
+      
+      // Log value-based efficiency ratios
+      Logger.log(`Efficiency ratios for '${campaign.name}' (VALUE-BASED): 
+        - 90-day: ${campaign.longTermEfficiencyRatio.toFixed(2)} (Share of value: ${((campaign.conversionValue || 0) / Math.max(1, totalLongTermConversionValue) * 100).toFixed(1)}%, Share of cost: ${(campaign.cost / Math.max(1, totalLongTermCost) * 100).toFixed(1)}%)
+        - ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day: ${campaign.recentEfficiencyRatio.toFixed(2)} (Share of value: ${((campaign.recentConversionValue || 0) / Math.max(1, totalRecentConversionValue) * 100).toFixed(1)}%, Share of cost: ${(campaign.recentCost / Math.max(1, totalRecentCost) * 100).toFixed(1)}%)`);
     } else {
-      campaign.longTermEfficiencyRatio = 0;
+      // For volume-based strategies, use original conversion count calculation
+      // Calculate long-term efficiency ratio (share of conversions / share of cost)
+      if (totalLongTermCost > 0 && totalLongTermConversions > 0) {
+        const shareOfCost = campaign.cost / totalLongTermCost;
+        const shareOfConversions = campaign.conversions / totalLongTermConversions;
+        campaign.longTermEfficiencyRatio = shareOfCost > 0 ? shareOfConversions / shareOfCost : 0;
+      } else {
+        campaign.longTermEfficiencyRatio = 0;
+      }
+      
+      // Calculate recent efficiency ratio
+      if (totalRecentCost > 0 && totalRecentConversions > 0) {
+        const shareOfRecentCost = campaign.recentCost / totalRecentCost;
+        const shareOfRecentConversions = campaign.recentConversions / totalRecentConversions;
+        campaign.recentEfficiencyRatio = shareOfRecentCost > 0 ? shareOfRecentConversions / shareOfRecentCost : 0;
+      } else {
+        campaign.recentEfficiencyRatio = 0;
+      }
+      
+      // Log volume-based efficiency ratios
+      Logger.log(`Efficiency ratios for '${campaign.name}' (VOLUME-BASED): 
+        - 90-day: ${campaign.longTermEfficiencyRatio.toFixed(2)} (Share of conv: ${(campaign.conversions / Math.max(1, totalLongTermConversions) * 100).toFixed(1)}%, Share of cost: ${(campaign.cost / Math.max(1, totalLongTermCost) * 100).toFixed(1)}%)
+        - ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day: ${campaign.recentEfficiencyRatio.toFixed(2)} (Share of conv: ${(campaign.recentConversions / Math.max(1, totalRecentConversions) * 100).toFixed(1)}%, Share of cost: ${(campaign.recentCost / Math.max(1, totalRecentCost) * 100).toFixed(1)}%)`);
     }
-    
-    // Calculate recent efficiency ratio
-    if (totalRecentCost > 0 && totalRecentConversions > 0) {
-      const shareOfRecentCost = campaign.recentCost / totalRecentCost;
-      const shareOfRecentConversions = campaign.recentConversions / totalRecentConversions;
-      campaign.recentEfficiencyRatio = shareOfRecentCost > 0 ? shareOfRecentConversions / shareOfRecentCost : 0;
-    } else {
-      campaign.recentEfficiencyRatio = 0;
-    }
-    
-    // Log efficiency ratios
-    Logger.log(`Efficiency ratios for '${campaign.name}': 
-      - 90-day: ${campaign.longTermEfficiencyRatio.toFixed(2)} (Share of conv: ${(campaign.conversions / Math.max(1, totalLongTermConversions) * 100).toFixed(1)}%, Share of cost: ${(campaign.cost / Math.max(1, totalLongTermCost) * 100).toFixed(1)}%)
-      - ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day: ${campaign.recentEfficiencyRatio.toFixed(2)} (Share of conv: ${(campaign.recentConversions / Math.max(1, totalRecentConversions) * 100).toFixed(1)}%, Share of cost: ${(campaign.recentCost / Math.max(1, totalRecentCost) * 100).toFixed(1)}%)`);
   });
   
   // Now calculate trend factors
@@ -3188,15 +3399,33 @@ function calculateTrendFactorsForAll(campaignData) {
 }
 
 /**
+ * Determine if a bidding strategy is value-based (focused on conversion value rather than just conversion count)
+ * 
+ * @param {string} strategyType - The bidding strategy type
+ * @return {boolean} - Whether this is a value-based strategy
+ */
+function isValueBasedStrategy(strategyType) {
+  // List of all value-based bidding strategies
+  const valueBasedStrategies = [
+    'MAXIMIZE_CONVERSION_VALUE',
+    'TARGET_ROAS',
+    'MAXIMIZE_CONVERSION_VALUE_TCPA' // NEW ENHANCED CONVERSION VALUE
+  ];
+  
+  return valueBasedStrategies.includes(strategyType);
+}
+
+/**
  * Simulates day-of-week optimization for previous days to determine if enough 
  * data/confidence would have been available on those days.
  * 
  * @param {Object} campaign - The campaign object
  * @param {number} daysToSimulate - Number of previous days to simulate
  * @param {boolean} includeWeekends - Whether to include weekend days in the simulation
+ * @param {Object} campaignData - The campaign data object with all campaign information
  * @return {Object} - Simulation results for each day
  */
-function simulatePreviousDaysOptimization(campaign, daysToSimulate, includeWeekends) {
+function simulatePreviousDaysOptimization(campaign, daysToSimulate, includeWeekends, campaignData) {
   const results = {};
   const today = new Date();
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -3239,7 +3468,8 @@ function simulatePreviousDaysOptimization(campaign, daysToSimulate, includeWeeke
     try {
       // Now run the adaptive day-of-week data collection function
       // It will use our overridden getDay function to simulate a different day
-      const simulatedData = getAdaptiveDayOfWeekData(campaign, `simulation_${formattedDate}`);
+      // Pass campaignData to avoid reference error
+      const simulatedData = getAdaptiveDayOfWeekData(campaign, campaignData || {}, `simulation_${formattedDate}`);
       
       // Determine if this day would have had enough data/confidence
       const hasReliableData = (simulatedData.adjustment && 
@@ -3577,7 +3807,7 @@ function safeGetCampaignData(campaign, dateRange) {
     // Get day-of-week data if enabled
     let dayOfWeekData = null;
     if (CONFIG.DAY_OF_WEEK.ENABLED) {
-      dayOfWeekData = getDayOfWeekData(campaign, dateRange);
+      dayOfWeekData = getDayOfWeekData(campaign, dateRange, campaignData);
     }
 
     return {
@@ -3746,7 +3976,7 @@ function analyzeCampaignPerformance(campaign, dateRange) {
   try {
     // Get day-of-week data first
     const dowDateRange = getDayOfWeekDateRange(dateRange);
-    const dayOfWeekData = getDayOfWeekData(campaign, dowDateRange);
+    const dayOfWeekData = getDayOfWeekData(campaign, dowDateRange, campaignData);
     
     // Store day-of-week data directly on campaign object
     campaign.dayOfWeekAdjustment = {
@@ -4358,45 +4588,162 @@ function processSharedBudget(budgetGroup, campaignData) {
   return finalBudgetScore;
 }
 
-// For each portfolio strategy
-for (const strategyName in campaignData.portfolioStrategies) {
-  const strategy = campaignData.portfolioStrategies[strategyName];
-  
-  // Calculate a performance score specific to this strategy type
-  let totalScore = 0;
-  let weightedTotal = 0;
-  
-  for (const campaignInfo of strategy.campaigns) {
-    try {
-      // Find matching campaign in our main dataset
-      let matchingCampaign = null;
-      for (const c of campaignData.campaigns) {
-        if (c.campaign.getId() === campaignInfo.id) {
-          matchingCampaign = c;
-          break;
-        }
-      }
-      
-      if (matchingCampaign) {
-        // Calculate objective-specific performance
-        const campaignScore = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
-        
-        // Weight by campaign cost or other relevant metric
-        const weight = matchingCampaign.cost || 1;
-        totalScore += campaignScore * weight;
-        weightedTotal += weight;
-      }
-    } catch (e) {
-      Logger.log(`Error calculating performance for campaign in portfolio: ${e}`);
-    }
+/**
+ * Process portfolio bid strategies and calculate their performance scores
+ */
+function processPortfolioStrategies(campaignData) {
+  if (!campaignData || !campaignData.portfolioStrategies) {
+    Logger.log("No portfolio strategies to process");
+    return;
   }
   
-  // Calculate weighted average score
-  const portfolioScore = weightedTotal > 0 ? totalScore / weightedTotal : 1.0;
+  Logger.log("\n===== PROCESSING PORTFOLIO STRATEGIES =====");
   
-  Logger.log(`Portfolio strategy "${strategyName}" performance score: ${portfolioScore.toFixed(2)}`);
+  // For each portfolio strategy
+  for (const strategyName in campaignData.portfolioStrategies) {
+    const strategy = campaignData.portfolioStrategies[strategyName];
+    
+    if (!strategy || !strategy.campaigns) {
+      Logger.log(`Strategy ${strategyName} has no campaigns, skipping`);
+      continue;
+    }
+    
+    Logger.log(`Analyzing portfolio strategy "${strategyName}" with ${strategy.campaigns.length} campaigns`);
+    
+    // Calculate a performance score specific to this strategy type
+    let totalScore = 0;
+    let weightedTotal = 0;
+    
+    for (const campaignInfo of strategy.campaigns) {
+      try {
+        // Find matching campaign in our main dataset
+        let matchingCampaign = null;
+        if (Array.isArray(campaignData.campaigns)) {
+          for (const c of campaignData.campaigns) {
+            if (c.campaign.getId() === campaignInfo.id) {
+              matchingCampaign = c;
+              break;
+            }
+          }
+        }
+        
+        if (matchingCampaign) {
+          // Calculate objective-specific performance
+          const campaignScore = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
+          
+          // Weight by campaign cost or other relevant metric
+          const weight = matchingCampaign.cost || 1;
+          totalScore += campaignScore * weight;
+          weightedTotal += weight;
+          
+          Logger.log(`  - Campaign "${matchingCampaign.name}" score: ${campaignScore.toFixed(2)}`);
+        } else {
+          Logger.log(`  - Campaign with ID ${campaignInfo.id} not found in analysis data`);
+        }
+      } catch (e) {
+        Logger.log(`  - Error calculating performance for campaign in portfolio: ${e}`);
+      }
+    }
+    
+    // Calculate weighted average score
+    const portfolioScore = weightedTotal > 0 ? totalScore / weightedTotal : 1.0;
+    
+    Logger.log(`Portfolio strategy "${strategyName}" performance score: ${portfolioScore.toFixed(2)}`);
+  }
   
-  // Use this score when generating recommendations for shared budgets
-  // associated with this portfolio (if applicable)
+  Logger.log("===============================================\n");
+}
+
+/**
+ * Validates if a day-of-week pattern is statistically significant
+ * @param {Array} indices - Array of performance indices for each day
+ * @param {Number} currentIndex - The performance index for the current day
+ * @return {Object} - Validation results including significance and pattern strength
+ */
+function validateDayOfWeekPattern(indices, currentIndex) {
+  try {
+    // Safety check - if indices is empty, return not significant
+    if (!indices || indices.length < 3) {
+      return {
+        isSignificant: false,
+        patternStrength: 0,
+        reason: "Insufficient days with data"
+      };
+    }
+    
+    // Ensure current index is a number
+    currentIndex = parseFloat(currentIndex) || 0;
+    
+    // Calculate pattern significance
+    const validIndices = indices.filter(val => typeof val === 'number' && !isNaN(val));
+    
+    if (validIndices.length < 3) {
+      return {
+        isSignificant: false,
+        patternStrength: 0,
+        reason: "Insufficient valid indices"
+      };
+    }
+    
+    const mean = validIndices.reduce((sum, val) => sum + val, 0) / validIndices.length;
+    const variance = validIndices.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / validIndices.length;
+    const stdDev = Math.sqrt(variance);
+    const patternStrength = mean > 0 ? stdDev / mean : 0;
+    
+    // Determine if pattern is significant - higher threshold for higher confidence
+    const isSignificant = patternStrength >= 0.1 && validIndices.length >= 3;
+    
+    return {
+      isSignificant: isSignificant,
+      patternStrength: patternStrength,
+      stdDev: stdDev,
+      mean: mean,
+      reason: isSignificant ? 
+        `Pattern is significant (strength: ${patternStrength.toFixed(2)})` : 
+        `Pattern is not significant (strength: ${patternStrength.toFixed(2)})`
+    };
+  } catch (e) {
+    Logger.log(`Error validating day-of-week pattern: ${e}`);
+    return {
+      isSignificant: false,
+      patternStrength: 0,
+      reason: `Error in validation: ${e}`
+    };
+  }
+}
+
+/**
+ * Groups campaigns by their budget type (shared or individual)
+ * @param {Array} campaigns - Array of campaign objects
+ * @return {Object} Object containing arrays for shared budget groups and individual campaigns
+ */
+function groupCampaignsByBudget(campaigns) {
+  const sharedBudgetGroups = {};
+  const individualCampaigns = [];
+  
+  // First identify campaigns by their budget ID pattern
+  campaigns.forEach(campaign => {
+    // Extract budget ID from campaign name if possible
+    const budgetMatch = campaign.name.match(/BUDGET\s+(\d+)/i);
+    const budgetId = budgetMatch ? `shared_budget_${budgetMatch[1]}` : null;
+    
+    // Add campaign.isSharedBudget property based on budget detection
+    campaign.isSharedBudget = !!budgetId;
+    campaign.sharedBudgetId = budgetId;
+    
+    if (campaign.isSharedBudget) {
+      if (!sharedBudgetGroups[budgetId]) {
+        sharedBudgetGroups[budgetId] = {
+          campaigns: [],
+          totalBudget: campaign.currentDailyBudget
+        };
+      }
+      sharedBudgetGroups[budgetId].campaigns.push(campaign);
+    } else {
+      individualCampaigns.push(campaign);
+    }
+  });
+  
+  return { sharedBudgetGroups, individualCampaigns };
 }
 
