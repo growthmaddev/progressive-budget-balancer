@@ -2226,7 +2226,17 @@ function calculateFuturePerformanceScore(campaign) {
 
 // Add this new function before processCampaignBudgets
 function processPortfolioBidStrategies(campaignData) {
-  // Check if we have any portfolio strategies to process
+  // Call the new function if it exists, otherwise fall back to legacy behavior
+  if (typeof processPortfolioStrategies === 'function') {
+    try {
+      Logger.log("Using enhanced portfolio strategy processor");
+      return processPortfolioStrategies(campaignData);
+    } catch (e) {
+      Logger.log(`Error using enhanced portfolio processor: ${e}. Falling back to legacy method.`);
+    }
+  }
+
+  // Legacy implementation (original code)
   if (!campaignData.portfolioStrategies || Object.keys(campaignData.portfolioStrategies).length === 0) {
     Logger.log("No portfolio bid strategies found to process");
     return;
@@ -2261,27 +2271,39 @@ function processPortfolioBidStrategies(campaignData) {
       const campaignId = campaignInfo.id;
       
       // Find this campaign in our main dataset
-      for (const campaign of campaignData.campaigns) {
-        if (campaign.campaign.getId() === campaignId) {
-          totalConversions += campaign.conversions || 0;
-          totalCost += campaign.cost || 0;
-          totalImpressionShareLost += campaign.budgetImpressionShareLost || 0;
-          totalBudget += campaign.currentDailyBudget || 0;
-          
-          if (campaign.trendFactor) {
-            totalTrendFactor += campaign.trendFactor;
-            campaignsWithData++;
+      let found = false;
+      if (campaignData && Array.isArray(campaignData.campaigns)) {
+        for (const campaign of campaignData.campaigns) {
+          try {
+            if (campaign.campaign.getId() === campaignId) {
+              totalConversions += campaign.conversions || 0;
+              totalCost += campaign.cost || 0;
+              totalImpressionShareLost += campaign.budgetImpressionShareLost || 0;
+              totalBudget += campaign.currentDailyBudget || 0;
+              
+              if (campaign.trendFactor) {
+                totalTrendFactor += campaign.trendFactor;
+                campaignsWithData++;
+              }
+              
+              found = true;
+              break;
+            }
+          } catch (e) {
+            Logger.log(`Error processing campaign in portfolio: ${e}`);
           }
-          
-          break;
         }
+      }
+      
+      if (!found) {
+        Logger.log(`Campaign with ID ${campaignId} not found in analysis data`);
       }
     }
     
     // Calculate averages
     const avgImpressionShareLost = campaignsWithData > 0 ? totalImpressionShareLost / campaignsWithData : 0;
     const avgTrendFactor = campaignsWithData > 0 ? totalTrendFactor / campaignsWithData : 1.0;
-    const avgBudget = strategy.campaigns.length > 0 ? totalBudget / strategy.campaigns.length : 0;
+    const avgBudget = strategy.campaigns && strategy.campaigns.length > 0 ? totalBudget / strategy.campaigns.length : 0;
     
     // Log portfolio performance
     Logger.log(`Portfolio "${strategyName}" performance:`);
@@ -2341,18 +2363,56 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
     // Process shared budgets first if they exist
     let sharedBudgetsProcessed = 0;
     if (campaignData.sharedBudgetData && Object.keys(campaignData.sharedBudgetData).length > 0) {
-      Logger.log("\n===== PROCESSING SHARED BUDGETS =====");
+      const budgetIds = Object.keys(campaignData.sharedBudgetData);
       
+      // First, log a summary of all shared budgets
+      Logger.log("\n=========== SHARED BUDGET OVERVIEW ===========");
+      Logger.log(`Total shared budgets found in account: ${budgetIds.length}`);
+      
+      // Collect empty budgets first
+      const emptyBudgets = [];
+      const activeBudgets = [];
+      
+      for (const budgetId of budgetIds) {
+        const budget = campaignData.sharedBudgetData[budgetId];
+        if (!budget.campaigns || budget.campaigns.length === 0) {
+          emptyBudgets.push({id: budgetId, name: budget.name, amount: budget.amount});
+        } else {
+          activeBudgets.push({id: budgetId, name: budget.name, amount: budget.amount, campaigns: budget.campaigns.length});
+        }
+      }
+      
+      // Log empty budgets in a separate section
+      if (emptyBudgets.length > 0) {
+        Logger.log("\n----- EMPTY SHARED BUDGETS (WILL BE SKIPPED) -----");
+        for (const budget of emptyBudgets) {
+          Logger.log(`  • ID: ${budget.id} | Name: "${budget.name}" | Amount: $${budget.amount.toFixed(2)}`);
+        }
+        Logger.log(`  Total: ${emptyBudgets.length} empty shared budgets will be skipped`);
+        Logger.log("---------------------------------------------------");
+      }
+      
+      // Log active budgets that will be processed
+      Logger.log("\n----- ACTIVE SHARED BUDGETS (WILL BE PROCESSED) -----");
+      for (const budget of activeBudgets) {
+        Logger.log(`  • ID: ${budget.id} | Name: "${budget.name}" | Amount: $${budget.amount.toFixed(2)} | Campaigns: ${budget.campaigns}`);
+      }
+      Logger.log(`  Total: ${activeBudgets.length} active shared budgets will be processed`);
+      Logger.log("-----------------------------------------------------");
+      Logger.log("=====================================================\n");
+      
+      // Process each active shared budget
       for (const budgetId in campaignData.sharedBudgetData) {
         const budgetGroup = campaignData.sharedBudgetData[budgetId];
         
         // Skip empty budget groups
         if (!budgetGroup.campaigns || budgetGroup.campaigns.length === 0) {
-          Logger.log(`Shared budget ${budgetGroup.name} has no campaigns - skipping`);
+          // Skip silently since we already logged empty budgets above
           continue;
         }
         
-        Logger.log(`\nProcessing shared budget "${budgetGroup.name}" with ${budgetGroup.campaigns.length} campaigns`);
+        // Clear section break for each budget
+        Logger.log(`\n===== PROCESSING SHARED BUDGET: "${budgetGroup.name}" (ID: ${budgetId}) =====`);
         
         // Calculate aggregate metrics for this budget group
         let totalTrendFactor = 0;
@@ -2361,7 +2421,8 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         let weightedImpShareLost = 0;
         let validCampaigns = 0;
         
-        Logger.log(`  Processing ${budgetGroup.campaigns.length} campaigns in shared budget`);
+        Logger.log(`Processing ${budgetGroup.campaigns.length} campaigns in this shared budget:`);
+        
         // Calculate aggregate metrics from all campaigns in this shared budget
         for (const campaignInfo of budgetGroup.campaigns) {
           try {
@@ -2444,20 +2505,20 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         const newBudgetAmount = currentAmount * adjustmentFactor;
         
         // Log the proposed change
-        Logger.log(`Adjustments for shared budget "${budgetGroup.name}":`);
-        Logger.log(`  - Current budget: ${currentAmount.toFixed(2)}`);
-        Logger.log(`  - Proposed adjustment: ${adjustmentFactor.toFixed(2)}`);
-        Logger.log(`  - Final budget: ${newBudgetAmount.toFixed(2)}`);
+        Logger.log(`\nBudget Adjustment Calculation for "${budgetGroup.name}":`);
+        Logger.log(`  - Current budget: $${currentAmount.toFixed(2)}`);
+        Logger.log(`  - Proposed adjustment factor: ${adjustmentFactor.toFixed(2)}`);
+        Logger.log(`  - Final budget: $${newBudgetAmount.toFixed(2)}`);
         Logger.log(`  - Reason: ${adjustmentReason.join(", ")}`);
         
         // Apply the budget change if significant enough
         if (Math.abs(newBudgetAmount - currentAmount) / currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
           if (CONFIG.PREVIEW_MODE) {
-            Logger.log(`  [PREVIEW MODE: Shared budget would be updated from ${currentAmount.toFixed(2)} to ${newBudgetAmount.toFixed(2)}]`);
+            Logger.log(`  [PREVIEW MODE: Budget would be updated from $${currentAmount.toFixed(2)} to $${newBudgetAmount.toFixed(2)}]`);
           } else {
             try {
               budgetGroup.budget.setAmount(newBudgetAmount);
-              Logger.log(`  [Shared budget updated successfully]`);
+              Logger.log(`  [Budget updated successfully]`);
               sharedBudgetsProcessed++;
             } catch (e) {
               Logger.log(`  [Error updating shared budget: ${e}]`);
@@ -2466,9 +2527,18 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         } else {
           Logger.log(`  [Change below minimum threshold of ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}% - not applied]`);
         }
+        
+        // Add clear end boundary
+        Logger.log(`===== COMPLETED SHARED BUDGET: "${budgetGroup.name}" =====\n`);
       }
       
-      Logger.log(`\nShared budgets processed: ${sharedBudgetsProcessed}`);
+      // Add a final summary for all shared budgets
+      Logger.log("\n=========== SHARED BUDGET RESULTS ===========");
+      Logger.log(`Total shared budgets in account: ${budgetIds.length}`);
+      Logger.log(`Active shared budgets: ${activeBudgets.length}`);
+      Logger.log(`Empty shared budgets skipped: ${emptyBudgets.length}`);
+      Logger.log(`Shared budgets successfully updated: ${sharedBudgetsProcessed}`);
+      Logger.log("============================================\n");
     }
     
     // Process portfolio bid strategies
@@ -4358,45 +4428,69 @@ function processSharedBudget(budgetGroup, campaignData) {
   return finalBudgetScore;
 }
 
-// For each portfolio strategy
-for (const strategyName in campaignData.portfolioStrategies) {
-  const strategy = campaignData.portfolioStrategies[strategyName];
-  
-  // Calculate a performance score specific to this strategy type
-  let totalScore = 0;
-  let weightedTotal = 0;
-  
-  for (const campaignInfo of strategy.campaigns) {
-    try {
-      // Find matching campaign in our main dataset
-      let matchingCampaign = null;
-      for (const c of campaignData.campaigns) {
-        if (c.campaign.getId() === campaignInfo.id) {
-          matchingCampaign = c;
-          break;
-        }
-      }
-      
-      if (matchingCampaign) {
-        // Calculate objective-specific performance
-        const campaignScore = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
-        
-        // Weight by campaign cost or other relevant metric
-        const weight = matchingCampaign.cost || 1;
-        totalScore += campaignScore * weight;
-        weightedTotal += weight;
-      }
-    } catch (e) {
-      Logger.log(`Error calculating performance for campaign in portfolio: ${e}`);
-    }
+/**
+ * Process portfolio bid strategies and calculate their performance scores
+ */
+function processPortfolioStrategies(campaignData) {
+  if (!campaignData || !campaignData.portfolioStrategies) {
+    Logger.log("No portfolio strategies to process");
+    return;
   }
   
-  // Calculate weighted average score
-  const portfolioScore = weightedTotal > 0 ? totalScore / weightedTotal : 1.0;
+  Logger.log("\n===== PROCESSING PORTFOLIO STRATEGIES =====");
   
-  Logger.log(`Portfolio strategy "${strategyName}" performance score: ${portfolioScore.toFixed(2)}`);
+  // For each portfolio strategy
+  for (const strategyName in campaignData.portfolioStrategies) {
+    const strategy = campaignData.portfolioStrategies[strategyName];
+    
+    if (!strategy || !strategy.campaigns) {
+      Logger.log(`Strategy ${strategyName} has no campaigns, skipping`);
+      continue;
+    }
+    
+    Logger.log(`Analyzing portfolio strategy "${strategyName}" with ${strategy.campaigns.length} campaigns`);
+    
+    // Calculate a performance score specific to this strategy type
+    let totalScore = 0;
+    let weightedTotal = 0;
+    
+    for (const campaignInfo of strategy.campaigns) {
+      try {
+        // Find matching campaign in our main dataset
+        let matchingCampaign = null;
+        if (Array.isArray(campaignData.campaigns)) {
+          for (const c of campaignData.campaigns) {
+            if (c.campaign.getId() === campaignInfo.id) {
+              matchingCampaign = c;
+              break;
+            }
+          }
+        }
+        
+        if (matchingCampaign) {
+          // Calculate objective-specific performance
+          const campaignScore = calculateStrategyPerformanceScore(matchingCampaign, campaignData);
+          
+          // Weight by campaign cost or other relevant metric
+          const weight = matchingCampaign.cost || 1;
+          totalScore += campaignScore * weight;
+          weightedTotal += weight;
+          
+          Logger.log(`  - Campaign "${matchingCampaign.name}" score: ${campaignScore.toFixed(2)}`);
+        } else {
+          Logger.log(`  - Campaign with ID ${campaignInfo.id} not found in analysis data`);
+        }
+      } catch (e) {
+        Logger.log(`  - Error calculating performance for campaign in portfolio: ${e}`);
+      }
+    }
+    
+    // Calculate weighted average score
+    const portfolioScore = weightedTotal > 0 ? totalScore / weightedTotal : 1.0;
+    
+    Logger.log(`Portfolio strategy "${strategyName}" performance score: ${portfolioScore.toFixed(2)}`);
+  }
   
-  // Use this score when generating recommendations for shared budgets
-  // associated with this portfolio (if applicable)
+  Logger.log("===============================================\n");
 }
 
