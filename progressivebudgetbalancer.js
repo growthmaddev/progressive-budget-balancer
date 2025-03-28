@@ -2511,26 +2511,93 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         Logger.log(`  - Final budget: $${newBudgetAmount.toFixed(2)}`);
         Logger.log(`  - Reason: ${adjustmentReason.join(", ")}`);
         
-        // Apply the budget change if significant enough
-        if (Math.abs(newBudgetAmount - currentAmount) / currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
-          if (CONFIG.PREVIEW_MODE) {
-            Logger.log(`  [PREVIEW MODE: Budget would be updated from $${currentAmount.toFixed(2)} to $${newBudgetAmount.toFixed(2)}]`);
-          } else {
-            try {
-              budgetGroup.budget.setAmount(newBudgetAmount);
-              Logger.log(`  [Budget updated successfully]`);
-              sharedBudgetsProcessed++;
-            } catch (e) {
-              Logger.log(`  [Error updating shared budget: ${e}]`);
-            }
-          }
-        } else {
-          Logger.log(`  [Change below minimum threshold of ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}% - not applied]`);
-        }
+        // Store the proposed adjustment for later application
+        budgetGroup.proposedAmount = newBudgetAmount;
+        budgetGroup.currentAmount = currentAmount;
+        budgetGroup.adjustmentFactor = adjustmentFactor;
+        budgetGroup.adjustmentReason = adjustmentReason.join(", ");
         
         // Add clear end boundary
         Logger.log(`===== COMPLETED SHARED BUDGET: "${budgetGroup.name}" =====\n`);
       }
+      
+      // NEW CODE: Calculate total current and proposed budgets to determine if scaling is needed
+      let totalCurrentSharedBudget = 0;
+      let totalProposedSharedBudget = 0;
+      let budgetsToAdjust = [];
+      
+      // Calculate totals
+      for (const budgetId in campaignData.sharedBudgetData) {
+        const budgetGroup = campaignData.sharedBudgetData[budgetId];
+        
+        // Skip empty budget groups
+        if (!budgetGroup.campaigns || budgetGroup.campaigns.length === 0) {
+          continue;
+        }
+        
+        totalCurrentSharedBudget += budgetGroup.currentAmount || 0;
+        totalProposedSharedBudget += budgetGroup.proposedAmount || 0;
+        budgetsToAdjust.push(budgetGroup);
+      }
+      
+      // Check if we need to scale the adjustments to stay within pacing limits
+      let scalingFactor = 1.0;
+      let scalingApplied = false;
+      
+      if (pacingInfo && pacingInfo.idealDailyRemaining && totalProposedSharedBudget > pacingInfo.idealDailyRemaining) {
+        scalingFactor = pacingInfo.idealDailyRemaining / totalProposedSharedBudget;
+        scalingApplied = true;
+        
+        Logger.log(`\n===== BUDGET PACING CONSTRAINT APPLIED =====`);
+        Logger.log(`Total proposed shared budgets: $${totalProposedSharedBudget.toFixed(2)}`);
+        Logger.log(`Ideal daily remaining budget: $${pacingInfo.idealDailyRemaining.toFixed(2)}`);
+        Logger.log(`Scaling factor applied: ${scalingFactor.toFixed(3)}`);
+        Logger.log(`============================================\n`);
+      }
+      
+      // Now apply all the budget adjustments with scaling if needed
+      let sharedBudgetsProcessed = 0;
+      let totalScaledBudget = 0;
+      
+      Logger.log(`\n===== APPLYING SHARED BUDGET ADJUSTMENTS =====`);
+      for (const budgetGroup of budgetsToAdjust) {
+        // Apply scaling if needed
+        let finalBudgetAmount = budgetGroup.proposedAmount;
+        if (scalingApplied) {
+          // Old formula (only scales the increase):
+          // finalBudgetAmount = budgetGroup.currentAmount + ((budgetGroup.proposedAmount - budgetGroup.currentAmount) * scalingFactor);
+          
+          // New formula (scales the entire proposed budget):
+          finalBudgetAmount = budgetGroup.proposedAmount * scalingFactor;
+          
+          // Log scaling details
+          Logger.log(`Scaling budget "${budgetGroup.name}":`);
+          Logger.log(`  - Original proposal: $${budgetGroup.proposedAmount.toFixed(2)}`);
+          Logger.log(`  - After pacing constraint: $${finalBudgetAmount.toFixed(2)}`);
+        }
+        
+        totalScaledBudget += finalBudgetAmount;
+        
+        // Apply the budget change if significant enough
+        if (Math.abs(finalBudgetAmount - budgetGroup.currentAmount) / budgetGroup.currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
+          if (CONFIG.PREVIEW_MODE) {
+            Logger.log(`  [PREVIEW MODE: Budget "${budgetGroup.name}" would be updated from $${budgetGroup.currentAmount.toFixed(2)} to $${finalBudgetAmount.toFixed(2)}]`);
+          } else {
+            try {
+              budgetGroup.budget.setAmount(finalBudgetAmount);
+              Logger.log(`  [Budget "${budgetGroup.name}" updated successfully to $${finalBudgetAmount.toFixed(2)}]`);
+              sharedBudgetsProcessed++;
+            } catch (e) {
+              Logger.log(`  [Error updating shared budget "${budgetGroup.name}": ${e}]`);
+            }
+          }
+        } else {
+          Logger.log(`  [Change for "${budgetGroup.name}" below minimum threshold of ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}% - not applied]`);
+        }
+      }
+      
+      Logger.log(`Total adjusted shared budget: $${totalScaledBudget.toFixed(2)}`);
+      Logger.log(`============================================\n`);
       
       // Add a final summary for all shared budgets
       Logger.log("\n=========== SHARED BUDGET RESULTS ===========");
@@ -2538,6 +2605,12 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
       Logger.log(`Active shared budgets: ${activeBudgets.length}`);
       Logger.log(`Empty shared budgets skipped: ${emptyBudgets.length}`);
       Logger.log(`Shared budgets successfully updated: ${sharedBudgetsProcessed}`);
+      Logger.log(`Budget pacing constraint applied: ${scalingApplied ? "Yes" : "No"}`);
+      if (scalingApplied) {
+        Logger.log(`Original total proposed: $${totalProposedSharedBudget.toFixed(2)}`);
+        Logger.log(`Scaled total applied: $${totalScaledBudget.toFixed(2)}`);
+        Logger.log(`Savings from pacing constraint: $${(totalProposedSharedBudget - totalScaledBudget).toFixed(2)}`);
+      }
       Logger.log("============================================\n");
     }
     
