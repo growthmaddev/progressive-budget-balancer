@@ -534,6 +534,86 @@ function validateDayOfWeekPattern(dayIndices, conversionVolume) {
   }
 }
 
+/**
+ * Groups campaigns by their budget type (shared or individual)
+ * @param {Array} campaigns - Array of campaign objects
+ * @return {Object} Object containing arrays for shared budget groups and individual campaigns
+ */
+function groupCampaignsByBudget(campaigns) {
+  try {
+    const sharedBudgetGroups = {};
+    const individualCampaigns = [];
+    const sharedBudgetObjects = {};
+    
+    // First pass: identify shared budget campaigns and group them
+    campaigns.forEach(campaign => {
+      if (campaign.isSharedBudget && campaign.sharedBudgetId) {
+        // Create the group if it doesn't exist
+        if (!sharedBudgetGroups[campaign.sharedBudgetId]) {
+          sharedBudgetGroups[campaign.sharedBudgetId] = {
+            budgetId: campaign.sharedBudgetId,
+            campaigns: [],
+            totalBudget: 0
+          };
+          
+          // Try to get the shared budget object
+          try {
+            // Construct or get the budget ID
+            const budgetId = campaign.sharedBudgetId;
+            
+            // Try to get the shared budget through the campaign's budget
+            const budget = campaign.campaign.getBudget();
+            if (budget) {
+              sharedBudgetObjects[campaign.sharedBudgetId] = budget;
+            }
+          } catch (e) {
+            Logger.log(`Could not get shared budget object for group ${campaign.sharedBudgetId}: ${e}`);
+          }
+        }
+        
+        // Add the campaign to its group
+        sharedBudgetGroups[campaign.sharedBudgetId].campaigns.push(campaign);
+        sharedBudgetGroups[campaign.sharedBudgetId].totalBudget = campaign.currentDailyBudget;
+      } else {
+        // Add to individual campaigns list
+        individualCampaigns.push(campaign);
+      }
+    });
+    
+    // Log summary information
+    Logger.log(`\n=== Campaign Budget Grouping ===`);
+    Logger.log(`Total campaigns processed: ${campaigns.length}`);
+    Logger.log(`Individual campaigns: ${individualCampaigns.length}`);
+    Logger.log(`Shared budget groups: ${Object.keys(sharedBudgetGroups).length}`);
+    Logger.log(`Shared budget campaigns: ${campaigns.length - individualCampaigns.length}`);
+    
+    // Log shared budget groups
+    if (Object.keys(sharedBudgetGroups).length > 0) {
+      Logger.log(`\nShared budget groups:`);
+      Object.keys(sharedBudgetGroups).forEach(budgetId => {
+        const group = sharedBudgetGroups[budgetId];
+        Logger.log(`  - Group ${budgetId}: ${group.campaigns.length} campaigns, budget: ${group.totalBudget.toFixed(2)}`);
+      });
+    }
+    
+    Logger.log(`==================================\n`);
+    
+    return {
+      sharedBudgetGroups,
+      individualCampaigns,
+      sharedBudgetObjects
+    };
+  } catch (e) {
+    Logger.log(`Error in groupCampaignsByBudget: ${e}`);
+    // Return safe default values if an error occurs
+    return {
+      sharedBudgetGroups: {},
+      individualCampaigns: campaigns, // Treat all as individual by default
+      sharedBudgetObjects: {}
+    };
+  }
+}
+
 // Modify calculateDayOfWeekAdjustment to use pattern validation
 function calculateDayOfWeekAdjustment(dayIndices) {
   try {
@@ -823,6 +903,8 @@ function getAdaptiveDayOfWeekData(campaign, purpose = 'main') {
   }
 }
 
+
+
 function main() {
   try {
     // Initialize script
@@ -868,6 +950,14 @@ function main() {
       Logger.log(`Error calculating budget pacing: ${e}`);
     }
     
+    // Group campaigns by shared budget
+    const { sharedBudgetGroups, individualCampaigns, sharedBudgetObjects } = groupCampaignsByBudget(campaignData.campaigns);
+    
+    // Store these in campaignData for later use
+    campaignData.sharedBudgetGroups = sharedBudgetGroups;
+    campaignData.individualCampaigns = individualCampaigns;
+    campaignData.sharedBudgetObjects = sharedBudgetObjects;
+    
     // Process campaign budgets
     try {
       processCampaignBudgets(campaignData, dateRange, pacingInfo);
@@ -889,6 +979,66 @@ function formatDateRange(startDate, endDate) {
     start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
     end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
   };
+}
+
+function calculateDayOfWeekIndices(dayPerformance) {
+  try {
+    // Calculate overall daily averages across all days
+    let totalConversions = 0;
+    let totalDays = 0;
+    
+    for (let i = 0; i < 7; i++) {
+      totalConversions += dayPerformance[i].conversions;
+      totalDays += dayPerformance[i].days;
+    }
+    
+    // Overall daily averages
+    const avgDailyConversions = totalDays > 0 ? totalConversions / totalDays : 0;
+    
+    // Calculate indices for each day (relative to average performance)
+    const dayIndices = {};
+    
+    for (let i = 0; i < 7; i++) {
+      const day = dayPerformance[i];
+      
+      // Skip days with insufficient data
+      if (day.days < CONFIG.DAY_OF_WEEK.MIN_DATA_POINTS) {
+        dayIndices[i] = {
+          name: day.name,
+          conversionIndex: 1.0, // Default to neutral
+          confidence: 0, // No confidence
+          sampleSize: day.days
+        };
+        continue;
+      }
+      
+      // Calculate conversion performance index
+      const conversionIndex = avgDailyConversions > 0 ? 
+        day.avgDailyConversions / avgDailyConversions : 1.0;
+      
+      // Calculate confidence score based on sample size
+      const confidence = Math.min(1.0, day.days / 30);
+      
+      // Store indices
+      dayIndices[i] = {
+        name: day.name,
+        conversionIndex: conversionIndex,
+        confidence: confidence,
+        sampleSize: day.days
+      };
+    }
+    
+    return {
+      dayIndices: dayIndices,
+      avgDailyConversions: avgDailyConversions
+    };
+  } catch (e) {
+    Logger.log(`Error calculating day-of-week indices: ${e}`);
+    return {
+      dayIndices: {},
+      avgDailyConversions: 0
+    };
+  }
 }
 
 function collectCampaignData(dateRange, dowDateRange) {
@@ -955,20 +1105,20 @@ function collectCampaignData(dateRange, dowDateRange) {
   }
 }
 
+// Update processCampaignData to properly handle conversions and shared budgets
 function processCampaignData(campaign, dateRange, dowDateRange) {
   try {
     const stats = campaign.getStatsFor(dateRange.start, dateRange.end);
     const budget = campaign.getBudget();
     const campaignName = campaign.getName();
     
-    // Get budget amount FIRST
+    // Get budget amount first
     const currentDailyBudget = budget.getAmount();
     
-    // Detect if campaign uses shared budget
+    // Detect shared budget status
     let isSharedBudget = false;
     let sharedBudgetId = null;
     
-    // Try API detection first
     try {
       const query = `
         SELECT campaign.id, campaign_budget.id, campaign_budget.type
@@ -1001,12 +1151,12 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       }
     }
     
-    // Get basic metrics
+    // Get metrics
     const cost = stats.getCost();
     const clicks = stats.getClicks();
     const impressions = stats.getImpressions();
     
-    // Get conversion metrics - THIS WAS MISSING
+    // Get conversion metrics
     let conversions, conversionValue;
     if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
       const conversionData = getSpecificConversionMetrics(
@@ -1021,30 +1171,81 @@ function processCampaignData(campaign, dateRange, dowDateRange) {
       conversionValue = conversions * CONFIG.CONVERSION_SETTINGS.ESTIMATED_CONVERSION_VALUE;
     }
     
-    // Get recent conversions (past 21 days)
+    // Get recent conversions
     let recentConversions = 0;
-    try {
-      recentConversions = getRecentConversions(campaign, CONFIG.RECENT_PERFORMANCE_PERIOD);
-    } catch (e) {
-      Logger.log(`Error getting recent conversions: ${e.message}`);
+    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
+      const endDate = new Date();
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - CONFIG.RECENT_PERFORMANCE_PERIOD);
+      
+      const recentDateRange = {
+        start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
+        end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
+      };
+      
+      const recentData = getSpecificConversionMetrics(
+        campaign, 
+        recentDateRange, 
+        CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME
+      );
+      recentConversions = recentData.conversions;
+    } else {
+      const endDate = new Date();
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - CONFIG.RECENT_PERFORMANCE_PERIOD);
+      
+      const recentDateRange = {
+        start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
+        end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
+      };
+      
+      const recentStats = campaign.getStatsFor(recentDateRange.start, recentDateRange.end);
+      recentConversions = recentStats.getConversions();
+    }
+    
+    // Get performance metrics
+    const impressionShare = getImpressionShare(campaign, dateRange);
+    const budgetImpressionShareLost = getImpressionShareLostToBudget(campaign, dateRange);
+    
+    // Get day-of-week data
+    let dayOfWeekData = null;
+    let dayOfWeekAdjustment = {
+      appliedMultiplier: 1.0,
+      confidence: 0.0,
+      rawMultiplier: 1.0,
+      dayName: "Fallback"
+    };
+    
+    if (CONFIG.DAY_OF_WEEK.ENABLED) {
+      try {
+        dayOfWeekData = getDayOfWeekData(campaign, dowDateRange);
+        
+        if (dayOfWeekData && dayOfWeekData.adjustment) {
+          dayOfWeekAdjustment = dayOfWeekData.adjustment;
+        }
+      } catch (e) {
+        Logger.log(`Error getting day-of-week data for ${campaignName}: ${e}`);
+      }
     }
     
     // Create campaign data object
-    const campaignData = {
+    return {
       campaign: campaign,
       name: campaignName,
       isSharedBudget: isSharedBudget,
       sharedBudgetId: sharedBudgetId,
-      currentDailyBudget: currentDailyBudget,
+      currentDailyBudget,
       cost,
-      clicks,
-      impressions,
       conversions,
       conversionValue,
-      recentConversions
+      clicks,
+      impressions,
+      recentConversions,
+      impressionShare,
+      budgetImpressionShareLost,
+      dayOfWeekData,
+      dayOfWeekAdjustment
     };
-    
-    return campaignData;
   } catch (e) {
     Logger.log(`Error processing campaign ${campaign.getName()}: ${e}`);
     return null;
@@ -1451,6 +1652,8 @@ function logCurrentBudgetStatus(campaignData) {
 
 function processSharedBudgets(campaignData, dateRange) {
   Logger.log("Processing shared budget campaigns...");
+Logger.log(`Updating SHARED BUDGET for group "${budgetId}" - campaigns: ${budget.campaigns.length}`);
+Logger.log(`  - From ${currentAmount.toFixed(2)} to ${newBudgetAmount.toFixed(2)}`);
   
   // Calculate today's maximum daily budget based on the monthly budget and days in current month
   const maxDailyBudget = calculateMaxDailyBudget();
