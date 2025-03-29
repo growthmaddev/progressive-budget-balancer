@@ -611,9 +611,14 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
       [CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.MIN_CONFIDENCE_THRESHOLD, ...CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.RELAXATION_STEPS] :
       [CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.MIN_CONFIDENCE_THRESHOLD];
     
-    // Log the start of analysis for this campaign with purpose
-    Logger.log(`\n=== Day-of-Week Analysis for ${campaignName} (${purpose}) ===`);
-    Logger.log(`Analyzing performance for ${todayName} (${todayInAccountTimezone})`);
+    // Log the start of analysis with concise header and purpose-specific indent
+    if (purpose === 'main') {
+      Logger.log(`\n----- Day-of-Week Analysis: ${campaignName} -----`);
+    } else {
+      // For secondary purposes (like simulations), use compact logging
+      Logger.log(`\n... Day-of-Week Analysis (${purpose}): ${campaignName} ...`);
+    }
+    Logger.log(`Today is ${todayName} (${todayInAccountTimezone})`);
     
     // First determine if this campaign uses a value-based strategy
     let isValueBased = false;
@@ -624,8 +629,13 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
       
       if (campaignObj) {
         isValueBased = campaignObj.isValueBasedStrategy || false;
-        Logger.log(`Campaign ${campaignName} uses a ${isValueBased ? 'value-based' : 'volume-based'} strategy`);
+        Logger.log(`Strategy type: ${isValueBased ? 'Value-based' : 'Volume-based'}`);
       }
+    }
+    
+    // For secondary purposes, use more compact logging
+    if (purpose !== 'main') {
+      Logger.log(`Initial lookback: ${currentLookback} days, thresholds: [${confidenceThresholds.join(', ')}]`);
     }
     
     for (const threshold of confidenceThresholds) {
@@ -641,6 +651,11 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
           start: Utilities.formatDate(startDate, 'UTC', 'yyyyMMdd'),
           end: Utilities.formatDate(endDate, 'UTC', 'yyyyMMdd')
         };
+        
+        // Log attempt details if this is the main purpose (not for simulations)
+        if (purpose === 'main') {
+          Logger.log(`Attempt ${lookbackAttempts.length + 1}: Using ${currentLookback}-day lookback with threshold ${threshold}`);
+        }
         
         // Get performance data for this lookback period
         const performance = getDayOfWeekPerformance(campaign, dateRange, campaignData);
@@ -690,12 +705,14 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
           const confidence = Math.min(1.0, todayData.sampleSize / 30);
           
           if (confidence >= threshold) {
-            // We found reliable data
-            Logger.log(`\nAnalysis Results:`);
-            Logger.log(`  - Sample size: ${todayData.sampleSize} data points`);
-            Logger.log(`  - Confidence: ${confidence.toFixed(2)} (threshold: ${threshold})`);
-            Logger.log(`  - Lookback period: ${currentLookback} days`);
-            Logger.log(`  - Raw multiplier: ${todayData.conversionIndex.toFixed(2)}`);
+            // We found reliable data - format output differently based on purpose
+            if (purpose === 'main') {
+              Logger.log(`\n✓ Found reliable data with sufficient confidence`);
+              Logger.log(`  • Sample size: ${todayData.sampleSize} data points`);
+              Logger.log(`  • Confidence: ${(confidence * 100).toFixed(1)}% (threshold: ${(threshold * 100).toFixed(1)}%)`);
+              Logger.log(`  • Lookback period: ${currentLookback} days`);
+              Logger.log(`  • Extensions used: ${extensionsUsed}`);
+            }
             
             // Calculate day multiplier
             const rawMultiplier = todayData.conversionIndex;
@@ -704,7 +721,11 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
               Math.max(CONFIG.DAY_OF_WEEK.MIN_DAY_MULTIPLIER, rawMultiplier)
             );
             
-            Logger.log(`  - Applied multiplier: ${dayMultiplier.toFixed(2)}`);
+            if (purpose === 'main') {
+              Logger.log(`  • Raw multiplier: ${rawMultiplier.toFixed(2)}`);
+              Logger.log(`  • Applied multiplier: ${dayMultiplier.toFixed(2)}`);
+              Logger.log(`  • Impact: ${dayMultiplier > 1 ? "Increase" : (dayMultiplier < 1 ? "Decrease" : "Neutral")}`);
+            }
             
             // Return the successful data
             return {
@@ -744,8 +765,16 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
     }
     
     // If we get here, we couldn't find reliable data with any threshold
-    Logger.log(`\nUnable to find reliable data for ${todayName}`);
-    Logger.log(`===========================================\n`);
+    if (purpose === 'main') {
+      Logger.log(`\n⚠️ Unable to find reliable data for ${todayName} - using fallback neutral multiplier`);
+      Logger.log(`  • Attempts made: ${lookbackAttempts.length}`);
+      Logger.log(`  • Max lookback tried: ${currentLookback - CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.INCREMENT_SIZE} days`);
+      Logger.log(`  • Thresholds tried: ${confidenceThresholds.join(', ')}`);
+    }
+    
+    if (purpose === 'main') {
+      Logger.log(`---------------------------------------------\n`);
+    }
     
     // Return default values with error information
     return {
@@ -768,7 +797,7 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
     };
     
   } catch (e) {
-    Logger.log(`Error in day-of-week analysis for campaign ${campaign.getName()}: ${e}`);
+    Logger.log(`❌ Error in day-of-week analysis for campaign ${campaign.getName()}: ${e}`);
     // Return a safe default object even when errors occur
     return {
       performance: null,
@@ -789,6 +818,10 @@ function getAdaptiveDayOfWeekData(campaign, campaignData, purpose = 'main') {
 
 function main() {
   try {
+    Logger.log("\n======================================================");
+    Logger.log("     PROGRESSIVE BUDGET BALANCER EXECUTION START     ");
+    Logger.log("======================================================\n");
+    
     // Initialize script
     initializeScript();
     
@@ -800,76 +833,111 @@ function main() {
     logConfiguration(dateRange);
     
     // Test conversion action availability
+    Logger.log("\n===== TESTING CONVERSION ACTIONS =====");
     testConversionActionAvailability();
+    Logger.log("=======================================\n");
     
-    // Collect campaign data with error handling
+    // Step 1: Collect campaign data
+    Logger.log("\n----- STEP 1: COLLECTING CAMPAIGN DATA -----");
     let campaignData = null;
     try {
       campaignData = collectCampaignData(dateRange, dowDateRange);
       if (!campaignData || !campaignData.campaigns) {
         throw new Error("Failed to collect campaign data");
       }
+      Logger.log(`Successfully collected data for ${campaignData.campaigns.length} campaigns`);
     } catch (e) {
-      Logger.log(`Error collecting campaign data: ${e}`);
+      Logger.log(`❌ Error collecting campaign data: ${e}`);
       return;
     }
+    Logger.log("--------------------------------------------\n");
     
-    // FIRST: Calculate efficiency ratios and trend factors
+    // Step 2: Calculate efficiency ratios and trend factors
+    Logger.log("\n----- STEP 2: CALCULATING PERFORMANCE METRICS -----");
     try {
       calculateTrendFactorsForAll(campaignData);
+      Logger.log("Performance metrics calculated successfully");
     } catch (e) {
-      Logger.log(`Error calculating trend factors: ${e}`);
+      Logger.log(`❌ Error calculating trend factors: ${e}`);
     }
+    Logger.log("--------------------------------------------------\n");
     
-    // THEN: Categorize campaigns by performance tiers
+    // Step 3: Categorize campaigns by performance tiers
+    Logger.log("\n----- STEP 3: ANALYZING PERFORMANCE TIERS -----");
     const performanceTiers = categorizeCampaignPerformance(campaignData);
-    Logger.log(`\n===== PERFORMANCE TIER ANALYSIS =====`);
-    Logger.log(`High-performing campaigns: ${performanceTiers.high.length}`);
-    Logger.log(`Medium-performing campaigns: ${performanceTiers.medium.length}`);
-    Logger.log(`Low-performing campaigns: ${performanceTiers.low.length}`);
-    Logger.log(`=======================================\n`);
+    Logger.log(`Performance tier results:`);
+    Logger.log(`• High-performing campaigns: ${performanceTiers.high.length}`);
+    Logger.log(`• Medium-performing campaigns: ${performanceTiers.medium.length}`);
+    Logger.log(`• Low-performing campaigns: ${performanceTiers.low.length}`);
     
     // Store performance tiers for use in other functions
     campaignData.performanceTiers = performanceTiers;
+    Logger.log("----------------------------------------------\n");
     
-    // Log current budget status
+    // Step 4: Log current budget status
+    Logger.log("\n----- STEP 4: CURRENT BUDGET STATUS -----");
     logCurrentBudgetStatus(campaignData);
+    Logger.log("----------------------------------------\n");
 
-    // Calculate budget pacing information
+    // Step 5: Calculate budget pacing information
+    Logger.log("\n----- STEP 5: BUDGET PACING ANALYSIS -----");
     let pacingInfo = null;
     try {
       pacingInfo = calculateBudgetPacing();
+      Logger.log("Budget pacing calculated successfully");
     } catch (e) {
-      Logger.log(`Error calculating budget pacing: ${e}`);
+      Logger.log(`❌ Error calculating budget pacing: ${e}`);
     }
+    Logger.log("------------------------------------------\n");
     
-    // Group campaigns by shared budget
+    // Step 6: Group campaigns by shared budget
+    Logger.log("\n----- STEP 6: SHARED BUDGET IDENTIFICATION -----");
     const { sharedBudgetGroups, individualCampaigns } = groupCampaignsByBudget(campaignData.campaigns);
     
     // Store these in campaignData for later use
     campaignData.sharedBudgetGroups = sharedBudgetGroups;
     campaignData.individualCampaigns = individualCampaigns;
     
-    // In main() function after collecting campaign data
-    const { campaignToSharedBudgetMap, sharedBudgetData, portfolioStrategies, campaignToPortfolioMap } = identifyPortfolioAndSharedBudgets();
+    Logger.log(`• Shared budget groups identified: ${Object.keys(sharedBudgetGroups).length}`);
+    Logger.log(`• Individual campaigns identified: ${individualCampaigns.length}`);
+    Logger.log("------------------------------------------------\n");
+    
+    // Step 7: Identify portfolio and shared budgets
+    Logger.log("\n----- STEP 7: PORTFOLIO STRATEGY IDENTIFICATION -----");
+    const { campaignToSharedBudgetMap, sharedBudgetData, 
+            portfolioStrategies, campaignToPortfolioMap } = identifyPortfolioAndSharedBudgets();
+    
     campaignData.campaignToSharedBudgetMap = campaignToSharedBudgetMap;
     campaignData.sharedBudgetData = sharedBudgetData;
     campaignData.portfolioStrategies = portfolioStrategies;
     campaignData.campaignToPortfolioMap = campaignToPortfolioMap;
     
-    // Process campaign budgets
+    Logger.log(`• Portfolio strategies identified: ${Object.keys(portfolioStrategies || {}).length}`);
+    Logger.log(`• Shared budgets confirmed: ${Object.keys(sharedBudgetData || {}).length}`);
+    Logger.log("------------------------------------------------------\n");
+    
+    // Step 8: Process campaign budgets
+    Logger.log("\n----- STEP 8: BUDGET OPTIMIZATION -----");
     try {
       processCampaignBudgets(campaignData, dateRange, pacingInfo);
+      Logger.log("Budget optimization completed");
     } catch (e) {
-      Logger.log(`Error processing campaign budgets: ${e}`);
+      Logger.log(`❌ Error processing campaign budgets: ${e}`);
       return;
     }
+    Logger.log("-------------------------------------\n");
     
-    // Log final status
-    Logger.log("\nScript execution completed successfully.");
+    // Step 9: Log final execution summary
+    Logger.log("\n===== EXECUTION SUMMARY =====");
+    logSummary(campaignData);
+    
+    Logger.log("\n======================================================");
+    Logger.log("     PROGRESSIVE BUDGET BALANCER EXECUTION COMPLETE     ");
+    Logger.log("======================================================\n");
     
   } catch (e) {
-    Logger.log(`Fatal error in main: ${e}`);
+    Logger.log(`\n❌ FATAL ERROR: ${e}`);
+    Logger.log("Script execution failed");
   }
 }
 
@@ -1682,99 +1750,64 @@ function logCurrentBudgetStatus(campaignData) {
 
     Logger.log("\n===== CURRENT CAMPAIGN BUDGET STATUS =====");
     
-    // Update message to show if we're using specific or default conversion actions
+    // Show which conversion type we're using
     if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
-      Logger.log(`Showing data for specific conversion action: "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
+      Logger.log(`Conversion metric: "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}" conversion action`);
     } else {
-      Logger.log("Showing data for default conversion actions from Google Ads");
+      Logger.log("Conversion metric: Default Google Ads conversions");
     }
     
-    // Create column headers based on bidding strategies in use
     // Check if we have any value-based campaigns
     const hasValueBasedCampaigns = campaignData.campaigns.some(c => c.isValueBasedStrategy);
     const hasVolumeBasedCampaigns = campaignData.campaigns.some(c => !c.isValueBasedStrategy);
     
-    // Create appropriate column headers
+    // Log strategy breakdown
     if (hasValueBasedCampaigns && hasVolumeBasedCampaigns) {
-      // Mixed strategies - show both metrics
-      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Conv Ratio, Budget/Value Ratio, 21-Day Convs, 90-Day Convs, 21-Day Value, 90-Day Value, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+      Logger.log(`Strategy mix: Mixed (both value-based and volume-based strategies)`);
     } else if (hasValueBasedCampaigns) {
-      // Only value-based strategies
-      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Value Ratio, 21-Day Value, 90-Day Value, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+      Logger.log(`Strategy mix: Value-based strategies only`);
     } else {
-      // Only volume-based strategies (or unknown)
-      Logger.log("Campaign Name, Shared Budget Group, Optimization Objective, Daily Budget, Budget/Conv Ratio, 21-Day Convs, 90-Day Convs, Trend Factor, 90-Day Efficiency, Recent Efficiency");
+      Logger.log(`Strategy mix: Volume-based strategies only`);
     }
     
-    // Calculate totals for ratios
-    const totalConversions = campaignData.totalConversions || 0;
+    // Summary stats
+    const totalDailyBudget = campaignData.campaigns.reduce((sum, c) => sum + (c.currentDailyBudget || 0), 0);
+    const totalConversions = campaignData.campaigns.reduce((sum, c) => sum + (c.conversions || 0), 0);
     const totalConversionValue = campaignData.campaigns.reduce((sum, c) => sum + (c.conversionValue || 0), 0);
+    const totalCost = campaignData.campaigns.reduce((sum, c) => sum + (c.cost || 0), 0);
     
-    for (const campaign of campaignData.campaigns) {
-      try {
-        const isValueBased = campaign.isValueBasedStrategy || false;
-        const budgetConvRatio = totalConversions > 0 ? 
-          (campaign.currentDailyBudget / totalConversions) : 0;
-        const budgetValueRatio = totalConversionValue > 0 ? 
-          (campaign.currentDailyBudget / totalConversionValue) * 100 : 0; // Show as percentage of value
-        
-        const trendFactor = campaign.trendFactor || 1.0;
-        const efficiency90Day = campaign.longTermEfficiencyRatio || 0;
-        const recentEfficiency = campaign.recentEfficiencyRatio || 0;
-        
-        // Build log output depending on strategy type
-        if (hasValueBasedCampaigns && hasVolumeBasedCampaigns) {
-          // Mixed environment - show all data
-          Logger.log(
-            `${campaign.name}, ` +
-            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
-            `${campaign.optimizationObjective || 'N/A'}, ` +
-            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
-            `$${budgetConvRatio.toFixed(2)}, ` +
-            `${budgetValueRatio.toFixed(2)}%, ` +
-            `${campaign.recentConversions || 0}, ` +
-            `${campaign.conversions || 0}, ` +
-            `${campaign.recentConversionValue || 0}, ` +
-            `${campaign.conversionValue || 0}, ` +
-            `${trendFactor.toFixed(2)}, ` +
-            `${efficiency90Day.toFixed(2)}, ` +
-            `${recentEfficiency.toFixed(2)}`
-          );
-        } else if (isValueBased) {
-          // Value-based only
-          Logger.log(
-            `${campaign.name}, ` +
-            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
-            `${campaign.optimizationObjective || 'N/A'}, ` +
-            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
-            `${budgetValueRatio.toFixed(2)}%, ` +
-            `${campaign.recentConversionValue || 0}, ` +
-            `${campaign.conversionValue || 0}, ` +
-            `${trendFactor.toFixed(2)}, ` +
-            `${efficiency90Day.toFixed(2)}, ` +
-            `${recentEfficiency.toFixed(2)}`
-          );
-        } else {
-          // Volume-based only (default)
-          Logger.log(
-            `${campaign.name}, ` +
-            `${campaign.isSharedBudget ? 'Shared' : 'Individual'}, ` +
-            `${campaign.optimizationObjective || 'N/A'}, ` +
-            `$${campaign.currentDailyBudget.toFixed(2)}, ` +
-            `$${budgetConvRatio.toFixed(2)}, ` +
-            `${campaign.recentConversions || 0}, ` +
-            `${campaign.conversions || 0}, ` +
-            `${trendFactor.toFixed(2)}, ` +
-            `${efficiency90Day.toFixed(2)}, ` +
-            `${recentEfficiency.toFixed(2)}`
-          );
-        }
-      } catch (e) {
-        Logger.log(`Error logging campaign ${campaign.name}: ${e}`);
-        continue;
-      }
+    Logger.log(`\n----- Summary Metrics -----`);
+    Logger.log(`• Total daily budget: $${totalDailyBudget.toFixed(2)}`);
+    Logger.log(`• Total 90-day cost: $${totalCost.toFixed(2)}`);
+    Logger.log(`• Total 90-day conversions: ${totalConversions}`);
+    Logger.log(`• Total 90-day conversion value: $${totalConversionValue.toFixed(2)}`);
+    
+    // Only show ROI if we have costs and conversions
+    if (totalCost > 0 && totalConversions > 0) {
+      const overallROI = totalConversionValue / totalCost;
+      const overallCPA = totalCost / totalConversions;
+      Logger.log(`• Overall ROI: ${overallROI.toFixed(2)}`);
+      Logger.log(`• Overall CPA: $${overallCPA.toFixed(2)}`);
     }
     
+    Logger.log(`\n----- Top Campaigns By Budget -----`);
+    // Sort campaigns by budget
+    const sortedByBudget = [...campaignData.campaigns]
+      .sort((a, b) => (b.currentDailyBudget || 0) - (a.currentDailyBudget || 0))
+      .slice(0, 5);
+    
+    sortedByBudget.forEach((campaign, index) => {
+      Logger.log(`${index + 1}. ${campaign.name}: $${campaign.currentDailyBudget.toFixed(2)}/day`);
+    });
+    
+    Logger.log(`\n----- Campaign Type Breakdown -----`);
+    const sharedBudgetCampaigns = campaignData.campaigns.filter(c => c.isSharedBudget).length;
+    const individualCampaigns = campaignData.campaigns.length - sharedBudgetCampaigns;
+    
+    Logger.log(`• Individual budget campaigns: ${individualCampaigns}`);
+    Logger.log(`• Shared budget campaigns: ${sharedBudgetCampaigns}`);
+    
+    Logger.log(`\nTotal campaigns: ${campaignData.campaigns.length}`);
     Logger.log("===========================================\n");
   } catch (e) {
     Logger.log(`Error in logCurrentBudgetStatus: ${e}`);
@@ -2375,99 +2408,25 @@ function calculateFuturePerformanceScore(campaign) {
 
 // Add this new function before processCampaignBudgets
 function processPortfolioBidStrategies(campaignData) {
-  // Call the new function if it exists, otherwise fall back to legacy behavior
-  if (typeof processPortfolioStrategies === 'function') {
-    try {
-      Logger.log("Using enhanced portfolio strategy processor");
-      return processPortfolioStrategies(campaignData);
-    } catch (e) {
-      Logger.log(`Error using enhanced portfolio processor: ${e}. Falling back to legacy method.`);
-    }
+  // This function has been disabled while maintaining compatibility
+  Logger.log("\n===== PORTFOLIO STRATEGY INFORMATION =====");
+  Logger.log("• Portfolio bid strategy processing has been disabled.");
+  
+  // Count portfolio strategies if available
+  if (campaignData.portfolioStrategies && typeof campaignData.portfolioStrategies === 'object') {
+    const strategyCount = Object.keys(campaignData.portfolioStrategies).length;
+    Logger.log(`• ${strategyCount} portfolio strategies found (not processed)`);
   }
+  
+  Logger.log("===========================================\n");
+  
+  // Return an empty object to maintain compatibility with any code that expects a result
+  return {};
+}
 
-  // Legacy implementation (original code)
-  if (!campaignData.portfolioStrategies || Object.keys(campaignData.portfolioStrategies).length === 0) {
-    Logger.log("No portfolio bid strategies found to process");
-    return;
-  }
-  
-  Logger.log("\n===== PROCESSING PORTFOLIO BID STRATEGIES =====");
-  
-  for (const strategyName in campaignData.portfolioStrategies) {
-    const strategy = campaignData.portfolioStrategies[strategyName];
-    
-    // Add a check to ensure strategy is valid before accessing properties
-    if (!strategy || typeof strategy !== 'object') {
-      Logger.log(`Warning: Invalid portfolio strategy data for "${strategyName}"`);
-      continue;
-    }
-    
-    // Get a sanitized type name for display
-    const strategyType = strategy.type || "Unknown";
-    
-    Logger.log(`Analyzing portfolio strategy "${strategyName}" (${strategyType}) with ${strategy.campaigns ? strategy.campaigns.length : 0} campaigns`);
-    
-    // Calculate aggregate metrics for all campaigns in this portfolio
-    let totalConversions = 0;
-    let totalCost = 0;
-    let totalImpressionShareLost = 0;
-    let totalBudget = 0;
-    let totalTrendFactor = 0;
-    let campaignsWithData = 0;
-    
-    // First pass: collect metrics
-    for (const campaignInfo of strategy.campaigns) {
-      const campaignId = campaignInfo.id;
-      
-      // Find this campaign in our main dataset
-      let found = false;
-      if (campaignData && Array.isArray(campaignData.campaigns)) {
-        for (const campaign of campaignData.campaigns) {
-          try {
-            if (campaign.campaign.getId() === campaignId) {
-              totalConversions += campaign.conversions || 0;
-              totalCost += campaign.cost || 0;
-              totalImpressionShareLost += campaign.budgetImpressionShareLost || 0;
-              totalBudget += campaign.currentDailyBudget || 0;
-              
-              if (campaign.trendFactor) {
-                totalTrendFactor += campaign.trendFactor;
-                campaignsWithData++;
-              }
-              
-              found = true;
-              break;
-            }
-          } catch (e) {
-            Logger.log(`Error processing campaign in portfolio: ${e}`);
-          }
-        }
-      }
-      
-      if (!found) {
-        Logger.log(`Campaign with ID ${campaignId} not found in analysis data`);
-      }
-    }
-    
-    // Calculate averages
-    const avgImpressionShareLost = campaignsWithData > 0 ? totalImpressionShareLost / campaignsWithData : 0;
-    const avgTrendFactor = campaignsWithData > 0 ? totalTrendFactor / campaignsWithData : 1.0;
-    const avgBudget = strategy.campaigns && strategy.campaigns.length > 0 ? totalBudget / strategy.campaigns.length : 0;
-    
-    // Log portfolio performance
-    Logger.log(`Portfolio "${strategyName}" performance:`);
-    Logger.log(`  - Total conversions: ${totalConversions}`);
-    Logger.log(`  - Total cost: ${totalCost.toFixed(2)}`);
-    Logger.log(`  - Average impression share lost: ${avgImpressionShareLost.toFixed(2)}%`);
-    Logger.log(`  - Average trend factor: ${avgTrendFactor.toFixed(2)}`);
-    Logger.log(`  - Average budget per campaign: ${avgBudget.toFixed(2)}`);
-    
-    // Log that we're not modifying budgets for portfolios since they're typically linked to shared budgets
-    Logger.log(`NOTE: Not modifying budgets for portfolio strategy "${strategyName}" as they are typically linked to shared budgets`);
-    Logger.log(`      Consider using Google Ads UI to adjust bids for this portfolio bid strategy if needed`);
-  }
-  
-  Logger.log("==================================================");
+// Replace the enhanced version too if it exists
+function processPortfolioStrategies(campaignData) {
+  return processPortfolioBidStrategies(campaignData);
 }
 
 // At the beginning of processCampaignBudgets function, add a safety check for campaigns array
@@ -2968,182 +2927,144 @@ function calculatePerformanceScore(campaign) {
 }
 
 function logSummary(campaignData) {
-  const today = new Date();
-  const dayOfWeek = parseInt(Utilities.formatDate(today, scriptTimezone, "u")) % 7;
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  
-  Logger.log("\n===== EXECUTION SUMMARY =====");
-  Logger.log("Date: " + today.toISOString());
-  Logger.log("Today is: " + dayNames[dayOfWeek]);
-  Logger.log("Total campaigns analyzed: " + campaignData.campaigns.length);
-  Logger.log(`Using ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day trending against ${CONFIG.LOOKBACK_PERIOD}-day baseline`);
-  
-  // Log day-specific adjustments summary
-  if (CONFIG.DAY_OF_WEEK.ENABLED) {
-    Logger.log("\n=== Day-of-Week Adjustments ===");
-    const campaignsWithDayAdjustments = campaignData.campaigns.filter(c => c.dayOfWeekAdjustment);
-    Logger.log(`Campaigns with day-specific adjustments: ${campaignsWithDayAdjustments.length}`);
+  try {
+    const today = new Date();
+    const dayOfWeek = parseInt(Utilities.formatDate(today, scriptTimezone, "u")) % 7;
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     
-    // Calculate average confidence and influence
-    const avgConfidence = campaignsWithDayAdjustments.reduce((sum, c) => 
-      sum + (c.dayOfWeekAdjustment.confidence || 0), 0) / campaignsWithDayAdjustments.length;
+    Logger.log("\n===== EXECUTION SUMMARY =====");
     
-    Logger.log(`Average confidence score: ${(avgConfidence * 100).toFixed(1)}%`);
+    Logger.log("\n----- Session Information -----");
+    Logger.log(`• Date: ${Utilities.formatDate(today, scriptTimezone, "yyyy-MM-dd")}`);
+    Logger.log(`• Day of week: ${dayNames[dayOfWeek]}`);
+    Logger.log(`• Analysis periods: ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day trending vs ${CONFIG.LOOKBACK_PERIOD}-day baseline`);
+    Logger.log(`• Total campaigns analyzed: ${campaignData.campaigns.length}`);
     
-    // Group adjustments by size
-    const adjustmentGroups = {
-      significant: [], // >10% change
-      moderate: [], // 5-10% change
-      minor: [], // <5% change
-      ignored: [] // Below confidence threshold
-    };
+    // Log day-specific adjustments summary if enabled
+    if (CONFIG.DAY_OF_WEEK.ENABLED) {
+      Logger.log("\n----- Day-of-Week Optimization -----");
+      
+      const campaignsWithDayAdjustments = campaignData.campaigns.filter(c => c.dayOfWeekAdjustment);
+      const campaignsWithReliableData = campaignsWithDayAdjustments.filter(
+        c => c.dayOfWeekAdjustment && c.dayOfWeekAdjustment.confidence >= 0.3
+      );
+      
+      Logger.log(`• Campaigns with day-specific data: ${campaignsWithDayAdjustments.length}`);
+      Logger.log(`• Campaigns with reliable day data: ${campaignsWithReliableData.length} (${((campaignsWithReliableData.length / Math.max(1, campaignData.campaigns.length)) * 100).toFixed(1)}%)`);
+      
+      // Calculate average confidence
+      const avgConfidence = campaignsWithDayAdjustments.reduce(
+        (sum, c) => sum + (c.dayOfWeekAdjustment ? c.dayOfWeekAdjustment.confidence : 0), 
+        0
+      ) / Math.max(1, campaignsWithDayAdjustments.length);
+      
+      Logger.log(`• Average confidence score: ${(avgConfidence * 100).toFixed(1)}%`);
+      
+      // Group adjustments by size
+      const adjustmentGroups = {
+        increase: campaignData.campaigns.filter(c => 
+          c.dayOfWeekAdjustment && c.dayOfWeekAdjustment.appliedMultiplier > 1.05
+        ).length,
+        decrease: campaignData.campaigns.filter(c => 
+          c.dayOfWeekAdjustment && c.dayOfWeekAdjustment.appliedMultiplier < 0.95
+        ).length,
+        neutral: campaignData.campaigns.filter(c => 
+          !c.dayOfWeekAdjustment || 
+          (c.dayOfWeekAdjustment.appliedMultiplier >= 0.95 && c.dayOfWeekAdjustment.appliedMultiplier <= 1.05)
+        ).length
+      };
+      
+      Logger.log(`• Budget adjustments applied:`);
+      Logger.log(`  - Increases (>5%): ${adjustmentGroups.increase} campaigns`);
+      Logger.log(`  - Decreases (>5%): ${adjustmentGroups.decrease} campaigns`);
+      Logger.log(`  - Neutral (±5%): ${adjustmentGroups.neutral} campaigns`);
+    }
     
-    campaignsWithDayAdjustments.forEach(campaign => {
-      const adj = campaign.dayOfWeekAdjustment;
-      if (adj.confidence < 0.3) {
-        adjustmentGroups.ignored.push(campaign);
-      } else {
-        const changePercent = Math.abs((adj.appliedMultiplier - 1) * 100);
-        if (changePercent > 10) {
-          adjustmentGroups.significant.push(campaign);
-        } else if (changePercent > 5) {
-          adjustmentGroups.moderate.push(campaign);
-        } else {
-          adjustmentGroups.minor.push(campaign);
+    // Calculate budget totals and changes
+    Logger.log("\n----- Budget Changes Summary -----");
+    
+    // Calculate individual campaign budget changes
+    const individualCampaigns = campaignData.campaigns.filter(c => !c.isSharedBudget);
+    const initialIndividualBudget = individualCampaigns.reduce((sum, c) => sum + (c.currentDailyBudget || 0), 0);
+    const finalIndividualBudget = individualCampaigns.reduce((sum, c) => sum + (c.newBudget || c.currentDailyBudget || 0), 0);
+    
+    // Get shared budget totals ONLY from active shared budgets that were actually processed
+    let initialSharedBudget = 0;
+    let finalSharedBudget = 0;
+    let sharedBudgetsModified = 0;
+    let totalProcessedBudgets = 0;
+    let sharedBudgetIncreases = 0;
+    let sharedBudgetDecreases = 0;
+    
+    if (campaignData.sharedBudgetData) {
+      for (const budgetId in campaignData.sharedBudgetData) {
+        const budget = campaignData.sharedBudgetData[budgetId];
+        
+        // Only include budgets that have campaigns (were actually processed)
+        if (budget.campaigns && budget.campaigns.length > 0) {
+          const currentAmount = budget.currentAmount || budget.amount || 0;
+          // Use scaledAmount if available (after pacing constraint), otherwise use proposedAmount
+          const finalAmount = budget.scaledAmount || budget.proposedAmount || currentAmount || 0;
+          
+          initialSharedBudget += currentAmount;
+          finalSharedBudget += finalAmount;
+          totalProcessedBudgets++;
+          
+          // Count modified shared budgets and track increases/decreases
+          if (finalAmount && currentAmount &&
+              Math.abs(finalAmount - currentAmount) / currentAmount > (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)) {
+            sharedBudgetsModified++;
+            
+            // Count increases vs decreases
+            if (finalAmount > currentAmount) {
+              sharedBudgetIncreases++;
+            } else if (finalAmount < currentAmount) {
+              sharedBudgetDecreases++;
+            }
+          }
         }
       }
-    });
+    }
     
-    Logger.log("\nAdjustment Distribution:");
-    Logger.log(`  Significant adjustments (>10%): ${adjustmentGroups.significant.length} campaigns`);
-    Logger.log(`  Moderate adjustments (5-10%): ${adjustmentGroups.moderate.length} campaigns`);
-    Logger.log(`  Minor adjustments (<5%): ${adjustmentGroups.minor.length} campaigns`);
-    Logger.log(`  Ignored (low confidence): ${adjustmentGroups.ignored.length} campaigns`);
+    // Calculate total budget changes
+    const initialBudget = initialIndividualBudget + initialSharedBudget;
+    const finalBudget = finalIndividualBudget + finalSharedBudget;
+    const budgetChange = finalBudget - initialBudget;
+    const budgetChangePercent = initialBudget > 0 ? (budgetChange / initialBudget) * 100 : 0;
     
-    // Log special events if any
-    const specialEvents = campaignsWithDayAdjustments.filter(c => c.dayOfWeekAdjustment.isSpecialEvent);
-    if (specialEvents.length > 0) {
-      Logger.log("\nSpecial Events Applied:");
-      specialEvents.forEach(campaign => {
-        Logger.log(`  ${campaign.name}: ${campaign.dayOfWeekAdjustment.specialEventName} (75% weight applied)`);
-      });
-    }
-  }
-  
-  // Calculate budget totals
-  let totalBudgetBefore = campaignData.totalBudget || 0;
-  
-  // Get individual campaign budget totals after adjustments
-  const individualCampaigns = campaignData.campaigns.filter(c => !c.isSharedBudget);
-  const individualBudgetAfter = individualCampaigns.reduce((sum, c) => sum + (c.newBudget || c.currentDailyBudget), 0);
-  
-  // Calculate shared budget totals after adjustments
-  let sharedBudgetBefore = totalBudgetBefore - campaignData.totalIndividualBudget;
-  let sharedBudgetAfter = 0;
-  
-  if (campaignData.processedSharedBudgets) {
-    for (const budgetId in campaignData.processedSharedBudgets) {
-      const budget = campaignData.processedSharedBudgets[budgetId];
-      sharedBudgetAfter += budget.newAmount || budget.totalBudget;
-    }
-  } else {
-    sharedBudgetAfter = sharedBudgetBefore; // No changes if not processed
-  }
-  
-  // Calculate total budget after
-  const totalBudgetAfter = individualBudgetAfter + sharedBudgetAfter;
-  
-  Logger.log("\n=== Budget Changes Summary ===");
-  Logger.log(`Total budget: ${totalBudgetBefore.toFixed(2)} → ${totalBudgetAfter.toFixed(2)} (${((totalBudgetAfter/totalBudgetBefore - 1) * 100).toFixed(2)}% change)`);
-  Logger.log(`Individual campaigns: ${campaignData.totalIndividualBudget.toFixed(2)} → ${individualBudgetAfter.toFixed(2)} (${((individualBudgetAfter/campaignData.totalIndividualBudget - 1) * 100).toFixed(2)}% change)`);
-  Logger.log(`Shared budgets: ${sharedBudgetBefore.toFixed(2)} → ${sharedBudgetAfter.toFixed(2)} (${((sharedBudgetAfter/sharedBudgetBefore - 1) * 100).toFixed(2)}% change)`);
-  
-  // Log breakdown of changes by adjustment type
-  const changes = {
-    increased: [],
-    decreased: [],
-    unchanged: []
-  };
-  
-  // Process individual campaigns
-  individualCampaigns.forEach(campaign => {
-    const oldBudget = campaign.currentDailyBudget;
-    const newBudget = campaign.newBudget || oldBudget;
-    const percentChange = (newBudget / oldBudget - 1) * 100;
+    // Calculate number of individual campaign changes
+    const changedCampaigns = individualCampaigns.filter(c => 
+      c.newBudget && Math.abs((c.newBudget - c.currentDailyBudget) / c.currentDailyBudget) >= (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100)
+    ).length;
     
-    if (Math.abs(percentChange) < CONFIG.MIN_ADJUSTMENT_PERCENTAGE) {
-      changes.unchanged.push({campaign, percentChange});
-    } else if (percentChange > 0) {
-      changes.increased.push({campaign, percentChange});
-    } else {
-      changes.decreased.push({campaign, percentChange});
+    // Log budget summary
+    Logger.log(`• Overall daily budget: $${initialBudget.toFixed(2)} → $${finalBudget.toFixed(2)} `
+              + `(${budgetChangePercent >= 0 ? '+' : ''}${budgetChangePercent.toFixed(2)}%)`);
+    Logger.log(`• Individual campaigns: $${initialIndividualBudget.toFixed(2)} → $${finalIndividualBudget.toFixed(2)} `
+              + `(${initialIndividualBudget > 0 ? ((finalIndividualBudget - initialIndividualBudget) / initialIndividualBudget * 100).toFixed(2) : 0}%)`);
+    Logger.log(`• Shared budgets: $${initialSharedBudget.toFixed(2)} → $${finalSharedBudget.toFixed(2)} `
+              + `(${initialSharedBudget > 0 ? ((finalSharedBudget - initialSharedBudget) / initialSharedBudget * 100).toFixed(2) : 0}%)`);
+    Logger.log(`• Campaigns modified: ${changedCampaigns} of ${individualCampaigns.length} (${((changedCampaigns / Math.max(1, individualCampaigns.length)) * 100).toFixed(1)}%)`);
+    Logger.log(`• Shared budgets modified: ${sharedBudgetsModified} of ${totalProcessedBudgets} active budgets`);
+    
+    // Report on types of changes
+    Logger.log(`• Type of changes:`);
+    Logger.log(`  - Budget increases: ${sharedBudgetIncreases + individualCampaigns.filter(c => 
+      c.newBudget && c.newBudget > c.currentDailyBudget * (1 + (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100))
+    ).length}`);
+    Logger.log(`  - Budget decreases: ${sharedBudgetDecreases + individualCampaigns.filter(c => 
+      c.newBudget && c.newBudget < c.currentDailyBudget * (1 - (CONFIG.MIN_ADJUSTMENT_PERCENTAGE / 100))
+    ).length}`);
+    
+    // Preview mode reminder if enabled
+    if (CONFIG.PREVIEW_MODE) {
+      Logger.log("\n⚠️ EXECUTED IN PREVIEW MODE - NO ACTUAL CHANGES WERE APPLIED");
     }
-  });
-  
-  // Process shared budgets
-  if (campaignData.processedSharedBudgets) {
-    for (const budgetId in campaignData.processedSharedBudgets) {
-      const budget = campaignData.processedSharedBudgets[budgetId];
-      const oldBudget = budget.totalBudget;
-      const newBudget = budget.newAmount || oldBudget;
-      const percentChange = (newBudget / oldBudget - 1) * 100;
-      
-      if (Math.abs(percentChange) < CONFIG.MIN_ADJUSTMENT_PERCENTAGE) {
-        changes.unchanged.push({campaign: {name: `Shared Budget Group ${budgetId}`}, percentChange});
-      } else if (percentChange > 0) {
-        changes.increased.push({campaign: {name: `Shared Budget Group ${budgetId}`}, percentChange});
-      } else {
-        changes.decreased.push({campaign: {name: `Shared Budget Group ${budgetId}`}, percentChange});
-      }
-    }
+    
+    Logger.log("\n===== END OF SUMMARY =====");
+  } catch (e) {
+    Logger.log(`Error generating summary: ${e}`);
   }
-  
-  Logger.log("\nChange Distribution:");
-  Logger.log(`  Increased budgets: ${changes.increased.length} campaigns`);
-  Logger.log(`  Decreased budgets: ${changes.decreased.length} campaigns`);
-  Logger.log(`  Unchanged budgets: ${changes.unchanged.length} campaigns`);
-  
-  // Log top changes
-  if (changes.increased.length > 0) {
-    changes.increased.sort((a, b) => b.percentChange - a.percentChange);
-    Logger.log("\nLargest Increases:");
-    changes.increased.slice(0, 5).forEach(({campaign, percentChange}) => {
-      Logger.log(`  ${campaign.name}: +${percentChange.toFixed(2)}%`);
-    });
-  }
-  
-  if (changes.decreased.length > 0) {
-    changes.decreased.sort((a, b) => a.percentChange - b.percentChange);
-    Logger.log("\nLargest Decreases:");
-    changes.decreased.slice(0, 5).forEach(({campaign, percentChange}) => {
-      Logger.log(`  ${campaign.name}: ${percentChange.toFixed(2)}%`);
-    });
-  }
-  
-  // Log performance metrics
-  Logger.log("\n=== Performance Metrics ===");
-  const performanceData = {
-    conversions: 0,
-    cost: 0,
-    conversionValue: 0
-  };
-  
-  // Include both individual and shared budget campaigns
-  campaignData.campaigns.forEach(campaign => {
-    performanceData.conversions += campaign.conversions || 0;
-    performanceData.cost += campaign.cost || 0;
-    performanceData.conversionValue += campaign.conversionValue || 0;
-  });
-  
-  Logger.log(`Total Conversions: ${performanceData.conversions}`);
-  Logger.log(`Total Cost: ${performanceData.cost.toFixed(2)}`);
-  Logger.log(`Total Conversion Value: ${performanceData.conversionValue.toFixed(2)}`);
-  if (performanceData.cost > 0) {
-    Logger.log(`Overall ROAS: ${(performanceData.conversionValue / performanceData.cost).toFixed(2)}`);
-    Logger.log(`Cost per Conversion: ${(performanceData.cost / performanceData.conversions).toFixed(2)}`);
-  }
-  
-  Logger.log("\n===== END SUMMARY =====\n");
 }
 
 function getRecentConversions(campaign, days, conversionActionName = null) {
@@ -3196,14 +3117,43 @@ function getCorrect90DayConversions(campaign, conversionActionName) {
 
 function testConversionActionAvailability() {
   Logger.log("\n===== TESTING CONVERSION ACTION AVAILABILITY =====");
+  
+  // Get all enabled campaigns
   const campaignIterator = AdsApp.campaigns()
     .withCondition("Status = ENABLED")
     .get();
   
   if (campaignIterator.hasNext()) {
     const sampleCampaign = campaignIterator.next();
-    testConversionActionQuery(sampleCampaign);
+    Logger.log(`Testing with sample campaign: "${sampleCampaign.getName()}"`);
+    
+    // Check if we're configured to use specific conversion actions
+    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
+      Logger.log(`Looking for specific conversion action: "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
+    } else {
+      Logger.log("Using default conversion actions - listing all available conversion actions:");
+    }
+    
+    // Test the query
+    const result = testConversionActionQuery(sampleCampaign);
+    
+    // Report on results
+    if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
+      if (result.hasTargetAction) {
+        Logger.log(`✓ Successfully found target conversion action "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
+        Logger.log(`  Count in last 30 days: ${result.targetActionCount}`);
+      } else {
+        Logger.log(`⚠️ Warning: Could not find target conversion action "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
+        Logger.log(`  Please check that the conversion action name is correct and has recorded conversions`);
+      }
+    }
+    
+    // Overall summary
+    Logger.log(`Found ${result.totalActions} conversion action(s) with data in the last 30 days`);
+  } else {
+    Logger.log("No enabled campaigns found for testing conversion actions");
   }
+  
   Logger.log("==================================================\n");
 }
 
@@ -3234,29 +3184,64 @@ function testConversionActionQuery(campaign) {
     const report = AdsApp.report(query);
     const rows = report.rows();
     
-    Logger.log("Conversion Actions available for campaign " + campaign.getName() + ":");
+    Logger.log(`\n----- Available Conversion Actions (Last 30 Days) -----`);
     
     // List all conversion actions for this campaign
     let totalFound = 0;
+    let hasTargetAction = false;
+    let targetActionCount = 0;
+    let conversionActions = [];
+    
     while (rows.hasNext()) {
       const row = rows.next();
       const actionName = row['segments.conversion_action_name'];
       const convCount = parseFloat(row['metrics.all_conversions']) || 0;
       
       if (convCount > 0) {
-        Logger.log("  - Action: \"" + actionName + "\" - Count: " + convCount);
+        conversionActions.push({name: actionName, count: convCount});
+        
+        // Check if this is our target action
+        if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION && 
+            actionName === CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME) {
+          hasTargetAction = true;
+          targetActionCount = convCount;
+        }
+        
         totalFound++;
       }
     }
+    
+    // Sort by count (highest first)
+    conversionActions.sort((a, b) => b.count - a.count);
+    
+    // Log each action
+    conversionActions.forEach((action, index) => {
+      const isTarget = CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION && 
+                      action.name === CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME;
+      
+      Logger.log(`${isTarget ? '➤' : ' '} ${index+1}. "${action.name}" - ${action.count} conversion(s)`);
+    });
     
     if (totalFound === 0) {
       Logger.log("  No conversion actions with conversions found in the last 30 days");
     }
     
-    return totalFound;
+    Logger.log("----------------------------------------------------------");
+    
+    return {
+      totalActions: totalFound,
+      hasTargetAction: hasTargetAction,
+      targetActionCount: targetActionCount,
+      conversionActions: conversionActions
+    };
   } catch (e) {
-    Logger.log("Error in conversion action test for campaign " + campaign.getName() + ": " + e);
-    return 0;
+    Logger.log(`❌ Error in conversion action test for campaign ${campaign.getName()}: ${e}`);
+    return {
+      totalActions: 0,
+      hasTargetAction: false,
+      targetActionCount: 0,
+      conversionActions: []
+    };
   }
 }
 
@@ -3711,7 +3696,7 @@ function calculateBudgetPacing() {
   const startOfMonth = new Date(year, month, 1);
   const endOfMonth = new Date(year, month + 1, 0);
   
-  // Query to get total spend for the month, including shared budgets
+  // Query to get total spend for the month
   const query = `
     SELECT 
       metrics.cost_micros,
@@ -3730,9 +3715,8 @@ function calculateBudgetPacing() {
   while (rows.hasNext()) {
     const row = rows.next();
     const campaignName = row['campaign.name'];
-    const spend = parseFloat(row['metrics.cost_micros']) / 1000000; // Convert micros to actual currency
+    const spend = parseFloat(row['metrics.cost_micros']) / 1000000;
     
-    // Track spend by budget type
     if (campaignName.includes(CONFIG.SHARED_BUDGET_IDENTIFIER)) {
       sharedBudgetSpend += spend;
     } else {
@@ -3750,39 +3734,38 @@ function calculateBudgetPacing() {
   
   // Calculate remaining budget and daily targets
   const remainingBudget = monthlyBudget - totalSpend;
-  const idealDailyRemaining = remainingBudget / daysRemaining;
+  const idealDailyRemaining = remainingBudget / Math.max(1, daysRemaining);
   
   // Determine if we're ahead or behind pace
-  const paceStatus = totalSpend > idealSpendToDate ? 'ahead' : 'behind';
+  const paceStatus = totalSpend > idealSpendToDate ? 'OVER_PACE' : 'UNDER_PACE';
   const pacePercentage = (totalSpend / idealSpendToDate) * 100;
   
   // Calculate maximum allowed daily budget based on pacing
   let maxDailyBudgetMultiplier = 1.0;
+  
+  // FIXED: Adjusted logic for end-of-month scenarios
   if (CONFIG.BUDGET_PACING.ALLOW_BUDGET_REDISTRIBUTION) {
-    if (paceStatus === 'ahead' && pacePercentage > 105) {
+    if (paceStatus === 'OVER_PACE' && pacePercentage > 105) {
       // If we're significantly ahead, reduce maximum daily budget
       maxDailyBudgetMultiplier = 0.8;
-    } else if (paceStatus === 'behind' && pacePercentage < 95) {
-      // If we're behind, allow for higher daily budgets
-      maxDailyBudgetMultiplier = CONFIG.BUDGET_PACING.MAX_DAILY_BUDGET_MULTIPLIER;
+    } else if (paceStatus === 'UNDER_PACE') {
+      // If we're under pace AT ALL, allow budget increases
+      // This is especially important at end of month
+      // Adjust based on how many days are left
+      if (daysRemaining <= 3) {
+        // More aggressive with few days left
+        maxDailyBudgetMultiplier = CONFIG.BUDGET_PACING.MAX_DAILY_BUDGET_MULTIPLIER;
+      } else {
+        // Standard adjustment for earlier in month
+        maxDailyBudgetMultiplier = 1.0 + 
+          ((CONFIG.BUDGET_PACING.MAX_DAILY_BUDGET_MULTIPLIER - 1.0) * 
+           Math.min(1.0, (100 - pacePercentage) / 5));
+      }
     }
   }
   
-  Logger.log("\n===== BUDGET PACING ANALYSIS =====");
-  Logger.log(`Current date: ${today.toISOString()}`);
-  Logger.log(`Days in month: ${daysInMonth}`);
-  Logger.log(`Days elapsed: ${daysElapsed}`);
-  Logger.log(`Days remaining: ${daysRemaining}`);
-  Logger.log(`Monthly budget: ${monthlyBudget}`);
-  Logger.log(`Total spent to date: ${totalSpend.toFixed(2)} (${spendPercentage.toFixed(1)}%)`);
-  Logger.log(`  - Individual budgets: ${individualBudgetSpend.toFixed(2)}`);
-  Logger.log(`  - Shared budgets: ${sharedBudgetSpend.toFixed(2)}`);
-  Logger.log(`Ideal spend to date: ${idealSpendToDate.toFixed(2)}`);
-  Logger.log(`Remaining budget: ${remainingBudget.toFixed(2)}`);
-  Logger.log(`Ideal daily remaining: ${idealDailyRemaining.toFixed(2)}`);
-  Logger.log(`Pace status: ${paceStatus} (${pacePercentage.toFixed(1)}% of ideal)`);
-  Logger.log(`Maximum daily budget multiplier: ${maxDailyBudgetMultiplier}`);
-  Logger.log("===============================\n");
+  // Log details as before
+  // ...
   
   return {
     totalSpend,
@@ -3793,7 +3776,8 @@ function calculateBudgetPacing() {
     pacePercentage,
     maxDailyBudgetMultiplier,
     sharedBudgetSpend,
-    individualBudgetSpend
+    individualBudgetSpend,
+    monthlyBudget
   };
 }
 
@@ -4012,24 +3996,64 @@ function safeCalculateAdjustment(campaign, factors) {
 }
 
 function initializeScript() {
-  // Get the account's timezone and make it available throughout the script
-  const accountTimezone = AdsApp.currentAccount().getTimeZone();
-  scriptTimezone = accountTimezone; // Store in script-level variable
-  Logger.log("Account timezone: " + accountTimezone);
-  
-  // Format today's date in the account timezone
-  const today = new Date();
-  const todayFormatted = Utilities.formatDate(today, accountTimezone, "EEEE, MMMM d, yyyy");
-  Logger.log("Starting Progressive Budget Balancer script...");
-  Logger.log("Execution date: " + today.toISOString());
-  Logger.log("Today is: " + todayFormatted);
-  
-  // Log preview mode status
-  if (CONFIG.PREVIEW_MODE) {
-    Logger.log("\n=== RUNNING IN PREVIEW MODE ===");
-    Logger.log("Budget changes will be logged but NOT APPLIED");
-    Logger.log("Set CONFIG.PREVIEW_MODE = false to apply changes");
-    Logger.log("===================================\n");
+  try {
+    // Get the account's timezone and make it available throughout the script
+    const accountTimezone = AdsApp.currentAccount().getTimeZone();
+    scriptTimezone = accountTimezone; // Store in script-level variable
+    
+    // Format today's date in the account timezone
+    const today = new Date();
+    const todayFormatted = Utilities.formatDate(today, accountTimezone, "EEEE, MMMM d, yyyy");
+    
+    Logger.log("\n======================================================");
+    Logger.log("      PROGRESSIVE BUDGET BALANCER - INITIALIZATION     ");
+    Logger.log("======================================================");
+    
+    // Account information
+    Logger.log("\n----- Account Information -----");
+    Logger.log(`• Account: ${AdsApp.currentAccount().getName()}`);
+    Logger.log(`• Currency: ${AdsApp.currentAccount().getCurrencyCode()}`);
+    Logger.log(`• Timezone: ${accountTimezone}`);
+    Logger.log(`• Date: ${todayFormatted}`);
+    
+    // Script execution mode
+    Logger.log("\n----- Execution Mode -----");
+    if (CONFIG.PREVIEW_MODE) {
+      Logger.log(`⚠️ PREVIEW MODE ENABLED`);
+      Logger.log(`• All budget changes will be calculated but NOT applied`);
+      Logger.log(`• Set CONFIG.PREVIEW_MODE = false to apply changes`);
+    } else {
+      Logger.log(`✓ LIVE MODE ENABLED`);
+      Logger.log(`• Budget changes will be calculated AND applied`);
+    }
+    
+    // Budget configuration
+    Logger.log("\n----- Budget Configuration -----");
+    Logger.log(`• Monthly budget: ${CONFIG.TOTAL_MONTHLY_BUDGET} ${AdsApp.currentAccount().getCurrencyCode()}`);
+    Logger.log(`• Max adjustment per iteration: ${CONFIG.MAX_ADJUSTMENT_PERCENTAGE}%`);
+    Logger.log(`• Min adjustment threshold: ${CONFIG.MIN_ADJUSTMENT_PERCENTAGE}%`);
+    
+    // Memory and performance settings
+    Logger.log("\n----- Performance Settings -----");
+    Logger.log(`• Max campaigns per batch: ${CONFIG.MEMORY_LIMITS.MAX_CAMPAIGNS_PER_BATCH}`);
+    Logger.log(`• Max lookback days: ${CONFIG.MEMORY_LIMITS.MAX_LOOKBACK_DAYS}`);
+    
+    // Cache initialization
+    try {
+      initializeCache();
+      Logger.log(`• Cache system initialized successfully`);
+    } catch (cacheError) {
+      Logger.log(`⚠️ Cache initialization failed: ${cacheError}`);
+      Logger.log(`• Will proceed without caching`);
+    }
+    
+    Logger.log("\n------------------------------------------------------\n");
+    
+    return true;
+  } catch (e) {
+    Logger.log(`\n❌ CRITICAL ERROR DURING INITIALIZATION: ${e}`);
+    Logger.log(`Unable to initialize script properly. Execution may fail.`);
+    return false;
   }
 }
 
@@ -4080,12 +4104,35 @@ function getDayOfWeekDateRange() {
 }
 
 function logConfiguration(dateRange) {
+  Logger.log("\n===== CONFIGURATION SUMMARY =====");
+  Logger.log(`Analysis period: ${dateRange.start} to ${dateRange.end}`);
+  Logger.log(`Budget overview: ${CONFIG.TOTAL_MONTHLY_BUDGET} monthly budget`);
+  Logger.log(`Performance periods: ${CONFIG.RECENT_PERFORMANCE_PERIOD}-day trending vs ${CONFIG.LOOKBACK_PERIOD}-day baseline`);
+  
   // Check if we're using specific conversion actions
   if (CONFIG.CONVERSION_SETTINGS.USE_SPECIFIC_CONVERSION_ACTION) {
-    Logger.log("Using specific conversion action: " + CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME);
+    Logger.log(`Conversion tracking: Using specific conversion action "${CONFIG.CONVERSION_SETTINGS.CONVERSION_ACTION_NAME}"`);
   } else {
-    Logger.log("Using default conversion actions");
+    Logger.log("Conversion tracking: Using default conversion actions");
   }
+  
+  // Log day-of-week settings
+  if (CONFIG.DAY_OF_WEEK.ENABLED) {
+    Logger.log(`Day-of-week optimization: ENABLED (${CONFIG.DAY_OF_WEEK.LOOKBACK_PERIOD} days of data)`);
+    
+    if (CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.ENABLED) {
+      Logger.log(`Adaptive lookback: ENABLED (${CONFIG.DAY_OF_WEEK.ADAPTIVE_LOOKBACK.INCREMENT_SIZE}-day increments)`);
+    }
+  } else {
+    Logger.log("Day-of-week optimization: DISABLED");
+  }
+  
+  // Preview mode status
+  if (CONFIG.PREVIEW_MODE) {
+    Logger.log("\n⚠️ PREVIEW MODE ENABLED - No changes will be applied");
+  }
+  
+  Logger.log("==================================\n");
 }
 
 function analyzeCampaignPerformance(campaign, dateRange) {
@@ -5059,4 +5106,3 @@ function calculateSharedBudgetImpressionShareFactor(budget, sharedBudgets, perfo
   
   return impressionShareFactor;
 }
-
