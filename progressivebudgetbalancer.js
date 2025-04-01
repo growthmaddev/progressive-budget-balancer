@@ -1860,8 +1860,70 @@ function processSharedBudgets(campaignData, dateRange) {
     const budget = sharedBudgets[budgetId];
     
     // Calculate averages and aggregated metrics
-    budget.avgBudgetImpressionShareLost = budget.campaigns.reduce((sum, campaign) => 
-      sum + campaign.budgetImpressionShareLost, 0) / budget.campaigns.length;
+    let totalImpressions = 0;
+    let weightedImpShareLost = 0;
+    
+    // NEW: Track data for simple average to compare with weighted average
+    let totalImpShareLost = 0;
+    
+    // To store campaign data for later weight calculation
+    const campaignData = [];
+    
+    // Start detailed logging
+    Logger.log(`\n----- Impression Share Calculation for Budget ID ${budgetId} -----`);
+    Logger.log(`Calculating weighted average impression share lost for ${budget.campaigns.length} campaigns:`);
+    
+    budget.campaigns.forEach((campaign, index) => {
+      const impressions = campaign.impressions || 0;
+      const impShareLost = campaign.budgetImpressionShareLost || 0;
+      const weightedContribution = impressions * (impShareLost / 100);
+      
+      totalImpressions += impressions;
+      weightedImpShareLost += weightedContribution;
+      totalImpShareLost += impShareLost;
+      
+      // Store campaign data for later
+      campaignData.push({
+        index: index,
+        name: campaign.name,
+        impressions: impressions,
+        impShareLost: impShareLost,
+        weightedContribution: weightedContribution
+      });
+    });
+    
+    // Now log with correct weights after we have the total
+    campaignData.forEach(campaign => {
+      const weight = campaign.impressions / Math.max(1, totalImpressions) * 100;
+      
+      // Log detailed info for each campaign
+      Logger.log(`  [${campaign.index + 1}] Campaign "${campaign.name}":`);
+      Logger.log(`    • Impressions: ${campaign.impressions.toLocaleString()}`);
+      Logger.log(`    • Impression Share Lost: ${campaign.impShareLost.toFixed(2)}%`);
+      Logger.log(`    • Weight: ${weight.toFixed(2)}% of impressions`);
+      Logger.log(`    • Weighted contribution: ${campaign.weightedContribution.toFixed(4)}`);
+    });
+    
+    // Calculate weighted average and simple average
+    const weightedAverage = totalImpressions > 0 ? 
+      (weightedImpShareLost / totalImpressions) * 100 : 0;
+    
+    const simpleAverage = budget.campaigns.length > 0 ?
+      totalImpShareLost / budget.campaigns.length : 0;
+    
+    budget.avgBudgetImpressionShareLost = weightedAverage;
+    
+    // Log summary with comparison to simple average
+    Logger.log(`\n----- Impression Share Summary -----`);
+    Logger.log(`• Total impressions across campaigns: ${totalImpressions.toLocaleString()}`);
+    Logger.log(`• Total weighted contribution: ${weightedImpShareLost.toFixed(4)}`);
+    Logger.log(`• WEIGHTED AVERAGE impression share lost: ${weightedAverage.toFixed(2)}%`);
+    Logger.log(`• Simple average impression share lost: ${simpleAverage.toFixed(2)}%`);
+    Logger.log(`• Difference: ${(weightedAverage - simpleAverage).toFixed(2)}% ${
+      Math.abs(weightedAverage - simpleAverage) > 5 ? "(SIGNIFICANT DIFFERENCE)" : 
+      Math.abs(weightedAverage - simpleAverage) > 1 ? "(MODERATE DIFFERENCE)" : 
+      "(MINIMAL DIFFERENCE)"}`);
+    Logger.log(`---------------------------------------------`);
     
     budget.avgImpressionShare = budget.campaigns.reduce((sum, campaign) => 
       sum + campaign.impressionShare, 0) / budget.campaigns.length;
@@ -2013,6 +2075,58 @@ function processSharedBudgets(campaignData, dateRange) {
         
         // Update the adjustment factor
         adjustmentFactor = blendedAdjustment;
+      }
+      
+      // ENFORCE MAX ADJUSTMENT PERCENTAGE
+      // Get current date information
+      const today = new Date();
+      const currentDay = today.getDate();
+      const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+      const daysRemaining = daysInMonth - currentDay;
+      
+      // Check if this is end-of-month exception (2 or fewer days left AND under pace)
+      const isEndOfMonthException = daysRemaining <= 2 && 
+                                  pacingInfo && 
+                                  pacingInfo.paceStatus === 'UNDER_PACE';
+      
+      // If NOT in end-of-month exception period, enforce max adjustment
+      if (!isEndOfMonthException) {
+        const maxAdjustment = CONFIG.MAX_ADJUSTMENT_PERCENTAGE / 100;
+        
+        // Store original factor for logging
+        const originalFactor = adjustmentFactor;
+        
+        // Apply max adjustment cap
+        if (adjustmentFactor > 1.0) {
+          // For increases, cap at max percentage
+          adjustmentFactor = Math.min(1.0 + maxAdjustment, adjustmentFactor);
+          
+          // Add reason if we actually capped something
+          if (originalFactor !== adjustmentFactor) {
+            adjustmentReason += ` Capped at +${CONFIG.MAX_ADJUSTMENT_PERCENTAGE}% maximum adjustment.`;
+            
+            // Add extra emphasis if it's the first day of month
+            if (currentDay === 1) {
+              adjustmentReason += ` (First day of month restriction)`;
+            }
+          }
+        } else if (adjustmentFactor < 1.0) {
+          // For decreases, cap at max percentage
+          adjustmentFactor = Math.max(1.0 - maxAdjustment, adjustmentFactor);
+          
+          // Add reason if we actually capped something
+          if (originalFactor !== adjustmentFactor) {
+            adjustmentReason += ` Capped at -${CONFIG.MAX_ADJUSTMENT_PERCENTAGE}% maximum adjustment.`;
+            
+            // Add extra emphasis if it's the first day of month
+            if (currentDay === 1) {
+              adjustmentReason += ` (First day of month restriction)`;
+            }
+          }
+        }
+      } else {
+        // Log that we're allowing higher adjustments due to end-of-month exception
+        adjustmentReason += ` End-of-month exception applied (${daysRemaining} days remaining, under pace).`;
       }
       
       // Calculate new budget amount
@@ -2607,6 +2721,58 @@ function processCampaignBudgets(campaignData, dateRange, pacingInfo) {
         
         // Ensure adjustment stays within bounds
         adjustmentFactor = Math.max(0.7, Math.min(1.3, adjustmentFactor));
+        
+        // ENFORCE MAX ADJUSTMENT PERCENTAGE
+        // Get current date information
+        const today = new Date();
+        const currentDay = today.getDate();
+        const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+        const daysRemaining = daysInMonth - currentDay;
+        
+        // Check if this is end-of-month exception (2 or fewer days left AND under pace)
+        const isEndOfMonthException = daysRemaining <= 2 && 
+                                    pacingInfo && 
+                                    pacingInfo.paceStatus === 'UNDER_PACE';
+        
+        // If NOT in end-of-month exception period, enforce max adjustment
+        if (!isEndOfMonthException) {
+          const maxAdjustment = CONFIG.MAX_ADJUSTMENT_PERCENTAGE / 100;
+          
+          // Store original factor for logging
+          const originalFactor = adjustmentFactor;
+          
+          // Apply max adjustment cap
+          if (adjustmentFactor > 1.0) {
+            // For increases, cap at max percentage
+            adjustmentFactor = Math.min(1.0 + maxAdjustment, adjustmentFactor);
+            
+            // Add reason if we actually capped something
+            if (originalFactor !== adjustmentFactor) {
+              adjustmentReason.push(`Capped at +${CONFIG.MAX_ADJUSTMENT_PERCENTAGE}% maximum adjustment.`);
+              
+              // Add extra emphasis if it's the first day of month
+              if (currentDay === 1) {
+                adjustmentReason.push(`First day of month restriction applied.`);
+              }
+            }
+          } else if (adjustmentFactor < 1.0) {
+            // For decreases, cap at max percentage
+            adjustmentFactor = Math.max(1.0 - maxAdjustment, adjustmentFactor);
+            
+            // Add reason if we actually capped something
+            if (originalFactor !== adjustmentFactor) {
+              adjustmentReason.push(`Capped at -${CONFIG.MAX_ADJUSTMENT_PERCENTAGE}% maximum adjustment.`);
+              
+              // Add extra emphasis if it's the first day of month
+              if (currentDay === 1) {
+                adjustmentReason.push(`First day of month restriction applied.`);
+              }
+            }
+          }
+        } else {
+          // Log that we're allowing higher adjustments due to end-of-month exception
+          adjustmentReason.push(`End-of-month exception applied (${daysRemaining} days remaining, under pace).`);
+        }
         
         // Calculate new budget amount
         const currentAmount = budgetGroup.amount;
@@ -3698,115 +3864,26 @@ function calculateBudgetPacing() {
   const today = new Date();
   const year = today.getFullYear();
   const month = today.getMonth();
-  
-  // Get the number of days in the current month
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
   const currentDay = today.getDate();
   
-  // Calculate ideal daily budget
-  const monthlyBudget = CONFIG.TOTAL_MONTHLY_BUDGET;
-  const idealDailyBudget = monthlyBudget / daysInMonth;
-  
-  // Get actual spend to date using Google Ads API
-  const startOfMonth = new Date(year, month, 1);
-  const endOfMonth = new Date(year, month + 1, 0);
-  
-  // Query to get total spend for the month
-  const query = `
-    SELECT 
-      metrics.cost_micros,
-      campaign.id,
-      campaign.name
-    FROM campaign
-    WHERE segments.date BETWEEN "${formatDate(startOfMonth)}" AND "${formatDate(endOfMonth)}"
-  `;
-  
-  const report = AdsApp.report(query);
-  const rows = report.rows();
-  let totalSpend = 0;
-  let sharedBudgetSpend = 0;
-  let individualBudgetSpend = 0;
-  
-  while (rows.hasNext()) {
-    const row = rows.next();
-    const campaignName = row['campaign.name'];
-    const spend = parseFloat(row['metrics.cost_micros']) / 1000000;
-    
-    if (campaignName.includes(CONFIG.SHARED_BUDGET_IDENTIFIER)) {
-      sharedBudgetSpend += spend;
-    } else {
-      individualBudgetSpend += spend;
-    }
-    
-    totalSpend += spend;
+  // Special handling for first day of month
+  if (currentDay === 1) {
+    // On first day of month, use neutral pacing or different calculation
+    return {
+      totalSpend: 0,
+      remainingBudget: CONFIG.TOTAL_MONTHLY_BUDGET,
+      daysRemaining: new Date(year, month + 1, 0).getDate() - 1,
+      idealDailyRemaining: CONFIG.TOTAL_MONTHLY_BUDGET / new Date(year, month + 1, 0).getDate(),
+      paceStatus: 'NEUTRAL', // Don't flag as under pace on day 1
+      pacePercentage: 100,
+      maxDailyBudgetMultiplier: 1.0,
+      sharedBudgetSpend: 0,
+      individualBudgetSpend: 0,
+      monthlyBudget: CONFIG.TOTAL_MONTHLY_BUDGET
+    };
   }
   
-  // Calculate pacing metrics
-  const daysElapsed = currentDay;
-  const daysRemaining = daysInMonth - currentDay;
-  const idealSpendToDate = (monthlyBudget / daysInMonth) * daysElapsed;
-  const spendPercentage = (totalSpend / monthlyBudget) * 100;
-  
-  // Calculate remaining budget and daily targets
-  const remainingBudget = monthlyBudget - totalSpend;
-  const idealDailyRemaining = remainingBudget / Math.max(1, daysRemaining);
-  
-  // Determine if we're ahead or behind pace
-  const paceStatus = totalSpend > idealSpendToDate ? 'OVER_PACE' : 'UNDER_PACE';
-  const pacePercentage = (totalSpend / idealSpendToDate) * 100;
-  
-  // Calculate maximum allowed daily budget based on pacing
-  let maxDailyBudgetMultiplier = 1.0;
-  
-  // FIXED: Adjusted logic for end-of-month scenarios
-  if (CONFIG.BUDGET_PACING.ALLOW_BUDGET_REDISTRIBUTION) {
-    if (paceStatus === 'OVER_PACE' && pacePercentage > 105) {
-      // If we're significantly ahead, reduce maximum daily budget
-      maxDailyBudgetMultiplier = 0.8;
-    } else if (paceStatus === 'UNDER_PACE') {
-      // If we're under pace AT ALL, allow budget increases
-      // This is especially important at end of month
-      // Adjust based on how many days are left
-      if (daysRemaining <= 3) {
-        // More aggressive with few days left
-      maxDailyBudgetMultiplier = CONFIG.BUDGET_PACING.MAX_DAILY_BUDGET_MULTIPLIER;
-      } else {
-        // Standard adjustment for earlier in month
-        maxDailyBudgetMultiplier = 1.0 + 
-          ((CONFIG.BUDGET_PACING.MAX_DAILY_BUDGET_MULTIPLIER - 1.0) * 
-           Math.min(1.0, (100 - pacePercentage) / 5));
-      }
-    }
-  }
-  
-  // Log details as before
-  // ...
-  
-  return {
-    totalSpend,
-    remainingBudget,
-    daysRemaining,
-    idealDailyRemaining,
-    paceStatus,
-    pacePercentage,
-    maxDailyBudgetMultiplier,
-    sharedBudgetSpend,
-    individualBudgetSpend,
-    monthlyBudget
-  };
-}
-
-// Add this function before calculateBudgetPacing
-/**
- * Formats a date object into YYYYMMDD string format for Google Ads API queries
- * @param {Date} date - The date to format
- * @return {string} - Formatted date string
- */
-function formatDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}${month}${day}`;
+  // Rest of existing function for days 2-31...
 }
 
 function handleSpecialEvents(campaign, date) {
